@@ -1,0 +1,79 @@
+import Foundation
+
+/// The credentials the widget needs. The app stores them together as one small JSON value in the login keychain.
+struct WidgetConfig: Codable, Equatable, Sendable {
+    var oauthToken: String?
+    var sessionKey: String?
+    var organizationId: String?
+
+    init(oauthToken: String? = nil, sessionKey: String? = nil, organizationId: String? = nil) {
+        self.oauthToken = oauthToken
+        self.sessionKey = sessionKey
+        self.organizationId = organizationId
+    }
+
+    /// True when there is nothing to sign in with. An organization ID on its own is not a credential.
+    var isEmpty: Bool { oauthToken == nil && sessionKey == nil }
+
+    /// The organization ID in claude.ai's lowercase form, or nil unless it really is a UUID.
+    var validatedOrganizationId: String? {
+        organizationId.flatMap(UUID.init(uuidString:))?.uuidString.lowercased()
+    }
+
+    /// Builds a config from the app's text fields: trims whitespace, turns blanks into nil, and validates.
+    static func fromFields(oauthToken: String?, sessionKey: String?, organizationId: String?) throws -> WidgetConfig {
+        let token = oauthToken?.trimmedNonEmpty
+        let key = sessionKey?.trimmedNonEmpty
+        let organization = organizationId?.trimmedNonEmpty
+
+        if let token, !token.isHeaderSafe { throw ConfigValidationError.invalidToken }
+        if let key, !key.isHeaderSafe || key.contains(";") { throw ConfigValidationError.invalidSessionKey }
+        if let organization, UUID(uuidString: organization) == nil { throw ConfigValidationError.invalidOrganizationId }
+        if key != nil, organization == nil { throw ConfigValidationError.missingOrganizationId }
+
+        return WidgetConfig(oauthToken: token, sessionKey: key, organizationId: organization?.lowercased())
+    }
+
+    func encoded() throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return try encoder.encode(self)
+    }
+
+    /// Decodes a stored config. Unknown keys are ignored and blank values count as missing.
+    static func decode(_ data: Data) throws -> WidgetConfig {
+        let raw = try JSONDecoder().decode(WidgetConfig.self, from: data)
+        return WidgetConfig(oauthToken: raw.oauthToken?.trimmedNonEmpty,
+                            sessionKey: raw.sessionKey?.trimmedNonEmpty,
+                            organizationId: raw.organizationId?.trimmedNonEmpty)
+    }
+}
+
+enum ConfigValidationError: Error, Equatable {
+    case invalidToken
+    case invalidSessionKey
+    case invalidOrganizationId
+    case missingOrganizationId
+
+    var message: String {
+        switch self {
+        case .invalidToken: return "The OAuth token has spaces or unusual characters. Paste only the token."
+        case .invalidSessionKey: return "The session key has spaces or unusual characters. Paste only the key."
+        case .invalidOrganizationId: return "Organization ID must be a UUID, like 123e4567-e89b-12d3-a456-426614174000."
+        case .missingOrganizationId: return "A session key also needs your organization ID."
+        }
+    }
+}
+
+extension String {
+    /// The text without surrounding whitespace, or nil when nothing is left.
+    var trimmedNonEmpty: String? {
+        let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    /// True when every character is visible ASCII, so the value can't split or extend an HTTP header.
+    var isHeaderSafe: Bool {
+        unicodeScalars.allSatisfy { (0x21...0x7E).contains($0.value) }
+    }
+}

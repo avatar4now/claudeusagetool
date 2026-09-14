@@ -15,3 +15,7 @@ build/
 
 # Secrets
 claude-usage-widget.json
+
+# Swift Package Manager
+.build/
+.swiftpm/

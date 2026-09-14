@@ -1,42 +1,9 @@
 import WidgetKit
 import SwiftUI
-import Darwin
-
-private enum ConfigLocation {
-    static var url: URL {
-        // Sandboxed extensions resolve `homeDirectoryForCurrentUser` to their container,
-        // not the account's real home directory where `~/.claude` lives.
-        let homeURL: URL
-        if let passwd = getpwuid(getuid()) {
-            homeURL = URL(fileURLWithPath: String(cString: passwd.pointee.pw_dir), isDirectory: true)
-        } else {
-            homeURL = FileManager.default.homeDirectoryForCurrentUser
-        }
-
-        return homeURL
-            .appendingPathComponent(".claude", isDirectory: true)
-            .appendingPathComponent("claude-usage-widget.json", isDirectory: false)
-    }
-}
+import Security
+import os
 
 // MARK: - Data Models
-
-struct UsageWindow: Codable {
-    let utilization: Int
-    let resets_at: String?
-}
-
-struct ClaudeUsageResponse: Codable {
-    let five_hour: UsageWindow?
-    let seven_day: UsageWindow?
-    let seven_day_sonnet: UsageWindow?
-    let seven_day_opus: UsageWindow?
-}
-
-struct ClaudeOrganization: Codable {
-    let uuid: String
-    let name: String?
-}
 
 struct ClaudeUsageEntry: TimelineEntry {
     let date: Date
@@ -56,94 +23,54 @@ struct ClaudeUsageEntry: TimelineEntry {
             error: nil
         )
     }
+
+    static func failure(_ error: UsageError) -> ClaudeUsageEntry {
+        ClaudeUsageEntry(date: Date(), fiveHourUtil: nil, fiveHourResetsAt: nil,
+                         weeklyUtil: nil, weeklyResetsAt: nil, error: error.message)
+    }
 }
 
 // MARK: - API Fetcher
 
+/// Logs outcomes only, never credential values. To read the log:
+/// log show --last 10m --predicate 'subsystem == "dev.huan.ClaudeUsageWidget"'
+private let logger = Logger(subsystem: "dev.huan.ClaudeUsageWidget", category: "widget")
+
 struct ClaudeAPIFetcher {
     static func fetchUsage() async -> ClaudeUsageEntry {
-        // Read credentials from shared config file
-        let configPath = ConfigLocation.url
+        // The widget runs in the background, so a keychain problem must become a message, never a dialog.
+        KeychainCredentialStore.preventKeychainDialogs()
 
-        guard let configData = try? Data(contentsOf: configPath),
-              let config = try? JSONDecoder().decode(WidgetConfig.self, from: configData) else {
-            return ClaudeUsageEntry(date: Date(), fiveHourUtil: nil, fiveHourResetsAt: nil,
-                                    weeklyUtil: nil, weeklyResetsAt: nil,
-                                    error: "No config. Create ~/.claude/claude-usage-widget.json")
-        }
-
-        // Try OAuth first, then fall back to session key
-        if let oauthToken = config.oauthToken {
-            if let result = await fetchViaOAuth(token: oauthToken) {
-                return result
-            }
-        }
-
-        if let sessionKey = config.sessionKey, let orgId = config.organizationId {
-            if let result = await fetchViaSessionKey(sessionKey: sessionKey, orgId: orgId) {
-                return result
-            }
-        }
-
-        return ClaudeUsageEntry(date: Date(), fiveHourUtil: nil, fiveHourResetsAt: nil,
-                                weeklyUtil: nil, weeklyResetsAt: nil,
-                                error: "Failed to fetch usage")
-    }
-
-    static func fetchViaOAuth(token: String) async -> ClaudeUsageEntry? {
-        guard let url = URL(string: "https://api.anthropic.com/api/oauth/usage") else { return nil }
-        var request = URLRequest(url: url, timeoutInterval: 10)
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
-        request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
-
-        return await performFetch(request: request)
-    }
-
-    static func fetchViaSessionKey(sessionKey: String, orgId: String) async -> ClaudeUsageEntry? {
-        guard !orgId.contains(".."), !orgId.contains("/"),
-              let url = URL(string: "https://claude.ai/api/organizations/\(orgId)/usage") else { return nil }
-
-        var request = URLRequest(url: url, timeoutInterval: 10)
-        request.setValue("sessionKey=\(sessionKey)", forHTTPHeaderField: "Cookie")
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-
-        return await performFetch(request: request)
-    }
-
-    static func performFetch(request: URLRequest) async -> ClaudeUsageEntry? {
+        let config: WidgetConfig
         do {
-            let (data, response) = try await URLSession.shared.data(for: request)
-            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { return nil }
+            guard let stored = try KeychainCredentialStore().load(), !stored.isEmpty else {
+                logger.notice("No credentials in the keychain")
+                return .failure(.noCredentials)
+            }
+            config = stored
+        } catch {
+            let usageError = error as? UsageError ?? .keychain(errSecInternalComponent)
+            logger.error("Keychain read failed: \(usageError.message, privacy: .public)")
+            return .failure(usageError)
+        }
+        logger.notice("Credentials loaded: oauth=\(config.oauthToken != nil, privacy: .public) sessionKey=\(config.sessionKey != nil, privacy: .public)")
 
-            let usage = try JSONDecoder().decode(ClaudeUsageResponse.self, from: data)
-            let formatter = ISO8601DateFormatter()
-            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-
-            let fiveHourReset: Date? = usage.five_hour?.resets_at.flatMap { formatter.date(from: $0) }
-            let weeklyReset: Date? = usage.seven_day?.resets_at.flatMap { formatter.date(from: $0) }
-
+        switch await UsageFetcher.live.fetch(config: config) {
+        case .success(let usage):
+            logger.notice("Usage fetched")
             return ClaudeUsageEntry(
                 date: Date(),
-                fiveHourUtil: usage.five_hour?.utilization,
-                fiveHourResetsAt: fiveHourReset,
-                weeklyUtil: usage.seven_day?.utilization,
-                weeklyResetsAt: weeklyReset,
+                fiveHourUtil: usage.fiveHourPercent.map { Int($0.rounded()) },
+                fiveHourResetsAt: usage.fiveHourResetsAt,
+                weeklyUtil: usage.weeklyPercent.map { Int($0.rounded()) },
+                weeklyResetsAt: usage.weeklyResetsAt,
                 error: nil
             )
-        } catch {
-            return nil
+        case .failure(let error):
+            logger.error("Usage fetch failed: \(error.message, privacy: .public)")
+            return .failure(error)
         }
     }
-}
-
-// MARK: - Config Model
-
-struct WidgetConfig: Codable {
-    let sessionKey: String?
-    let organizationId: String?
-    let oauthToken: String?
 }
 
 // MARK: - Timeline Provider
@@ -400,11 +327,8 @@ struct ClaudeUsageLargeView: View {
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
-                Text("Create config at:")
+                Text("Open the Claude Usage Widget app to fix this.")
                     .font(.system(size: 10))
-                    .foregroundStyle(.tertiary)
-                Text("~/.claude/claude-usage-widget.json")
-                    .font(.system(size: 10, design: .monospaced))
                     .foregroundStyle(.tertiary)
             }
             .padding()

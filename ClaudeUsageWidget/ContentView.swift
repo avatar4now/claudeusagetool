@@ -1,19 +1,9 @@
 import SwiftUI
-import Darwin
+import WidgetKit
+import os
 
-private enum ConfigLocation {
-    static var url: URL {
-        if let passwd = getpwuid(getuid()) {
-            return URL(fileURLWithPath: String(cString: passwd.pointee.pw_dir), isDirectory: true)
-                .appendingPathComponent(".claude", isDirectory: true)
-                .appendingPathComponent("claude-usage-widget.json", isDirectory: false)
-        }
-
-        return FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".claude", isDirectory: true)
-            .appendingPathComponent("claude-usage-widget.json", isDirectory: false)
-    }
-}
+/// Logs outcomes only, never credential values.
+private let logger = Logger(subsystem: "dev.huan.ClaudeUsageWidget", category: "app")
 
 struct ContentView: View {
     @State private var sessionKey = ""
@@ -22,7 +12,10 @@ struct ContentView: View {
     @State private var statusMessage = ""
     @State private var isSuccess = false
 
-    private let configURL = ConfigLocation.url
+    /// The keychain item is shared with exactly one other program: the widget embedded inside this app.
+    private let store = KeychainCredentialStore(trustedBundleURLs: [
+        Bundle.main.bundleURL.appendingPathComponent("Contents/PlugIns/ClaudeUsageWidgetExtension.appex")
+    ])
 
     var body: some View {
         VStack(spacing: 20) {
@@ -93,48 +86,66 @@ struct ContentView: View {
 
             Spacer()
 
-            Text("Config saved to: ~/.claude/claude-usage-widget.json")
-                .font(.system(size: 10, design: .monospaced))
+            Text("Stored in your login keychain. Only this app and its widget can read it.")
+                .font(.system(size: 10))
                 .foregroundStyle(.tertiary)
         }
         .padding(24)
         .frame(minWidth: 500, minHeight: 400)
         .onAppear {
+            migrateLegacyFile()
             loadConfig()
+            WidgetCenter.shared.reloadAllTimelines()
+        }
+    }
+
+    /// Moves credentials out of the old plaintext file, if it still exists.
+    func migrateLegacyFile() {
+        let outcome = ConfigMigration.run(store: store)
+        logger.notice("Legacy config migration: \(String(describing: outcome), privacy: .public)")
+        if let message = outcome.message {
+            statusMessage = message
+            isSuccess = outcome == .imported
         }
     }
 
     func saveConfig() {
-        let config: [String: String?] = [
-            "sessionKey": sessionKey.isEmpty ? nil : sessionKey,
-            "organizationId": organizationId.isEmpty ? nil : organizationId,
-            "oauthToken": oauthToken.isEmpty ? nil : oauthToken
-        ]
-
         do {
-            let data = try JSONSerialization.data(
-                withJSONObject: config.compactMapValues { $0 },
-                options: [.prettyPrinted, .sortedKeys]
-            )
-            let dir = configURL.deletingLastPathComponent()
-            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-            try data.write(to: configURL)
-            statusMessage = "Configuration saved!"
+            let outcome = try ConfigEditor.save(oauthToken: oauthToken, sessionKey: sessionKey,
+                                                organizationId: organizationId, store: store)
+            logger.notice("Save: \(String(describing: outcome), privacy: .public)")
+            statusMessage = outcome == .saved
+                ? "Saved to your keychain. The widget is refreshing."
+                : "Credentials removed from your keychain."
             isSuccess = true
+            loadConfig()
+            WidgetCenter.shared.reloadAllTimelines()
+        } catch let error as ConfigValidationError {
+            statusMessage = error.message
+            isSuccess = false
+        } catch let error as UsageError {
+            logger.error("Save failed: \(error.message, privacy: .public)")
+            statusMessage = error.message
+            isSuccess = false
         } catch {
-            statusMessage = "Failed to save: \(error.localizedDescription)"
+            statusMessage = "Couldn't finish saving: \(error.localizedDescription)"
             isSuccess = false
         }
     }
 
     func loadConfig() {
-        guard let data = try? Data(contentsOf: configURL),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: String] else {
-            return
+        do {
+            let config = try store.load() ?? WidgetConfig()
+            oauthToken = config.oauthToken ?? ""
+            sessionKey = config.sessionKey ?? ""
+            organizationId = config.organizationId ?? ""
+        } catch let error as UsageError {
+            statusMessage = error.message
+            isSuccess = false
+        } catch {
+            statusMessage = "Couldn't read the keychain."
+            isSuccess = false
         }
-        sessionKey = json["sessionKey"] ?? ""
-        organizationId = json["organizationId"] ?? ""
-        oauthToken = json["oauthToken"] ?? ""
     }
 }
 
