@@ -5,6 +5,7 @@ import Foundation
 enum UsageError: Error, Equatable, Sendable {
     case noCredentials
     case invalidOrganizationId
+    case invalidCredentials
     case http(Int)
     case network
     case invalidResponse
@@ -14,6 +15,7 @@ enum UsageError: Error, Equatable, Sendable {
         switch self {
         case .noCredentials: return "Add credentials in the Claude Usage Widget app."
         case .invalidOrganizationId: return "Organization ID must be a UUID. Fix it in the app."
+        case .invalidCredentials: return "Stored credentials are malformed. Save them again in the app."
         case .http(401): return "Credentials rejected (401). Update them in the app."
         case .http(403): return "Access denied (403). This credential can't read usage."
         case .http(429): return "Rate limited (429). Retrying on the next refresh."
@@ -42,7 +44,9 @@ enum FallbackPolicy {
 enum ClaudeEndpoints {
     static let oauthUsageURL = URL(string: "https://api.anthropic.com/api/oauth/usage")!
 
-    static func oauthRequest(token: String) -> URLRequest {
+    /// Returns nil for a token that could break the Authorization header.
+    static func oauthRequest(token: String) -> URLRequest? {
+        guard WidgetConfig.isSafeToken(token) else { return nil }
         var request = baseRequest(oauthUsageURL)
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
@@ -51,8 +55,10 @@ enum ClaudeEndpoints {
     }
 
     /// The URL is rebuilt from a parsed UUID, never from the raw text, so nothing else can reach the path.
+    /// Returns nil for an invalid organization ID or a session key that could break the Cookie header.
     static func sessionKeyRequest(sessionKey: String, organizationId: String) -> URLRequest? {
-        guard let uuid = UUID(uuidString: organizationId),
+        guard WidgetConfig.isSafeSessionKey(sessionKey),
+              let uuid = UUID(uuidString: organizationId),
               let url = URL(string: "https://claude.ai/api/organizations/\(uuid.uuidString.lowercased())/usage")
         else { return nil }
         var request = baseRequest(url)
@@ -118,8 +124,10 @@ struct UsageFetcher {
     func fetch(config: WidgetConfig) async -> Result<UsageSnapshot, UsageError> {
         var oauthFailure: UsageError?
 
+        // Stored values were validated when saved; these checks are a tripwire in case the keychain item was altered.
         if let token = config.oauthToken {
-            switch await attempt(ClaudeEndpoints.oauthRequest(token: token)) {
+            guard let request = ClaudeEndpoints.oauthRequest(token: token) else { return .failure(.invalidCredentials) }
+            switch await attempt(request) {
             case .success(let snapshot):
                 return .success(snapshot)
             case .failure(let error):
@@ -131,6 +139,7 @@ struct UsageFetcher {
         }
 
         guard let sessionKey = config.sessionKey else { return .failure(oauthFailure ?? .noCredentials) }
+        guard WidgetConfig.isSafeSessionKey(sessionKey) else { return .failure(.invalidCredentials) }
         guard let organizationId = config.validatedOrganizationId,
               let request = ClaudeEndpoints.sessionKeyRequest(sessionKey: sessionKey, organizationId: organizationId)
         else { return .failure(oauthFailure ?? .invalidOrganizationId) }

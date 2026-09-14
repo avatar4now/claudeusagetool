@@ -42,6 +42,14 @@ final class LegacyConfigFileTests: XCTestCase {
         }
     }
 
+    func testInspectTreatsCredentialsThatCouldBreakHeadersAsUnreadable() throws {
+        for text in [#"{"oauthToken":"abc\r\nX-Injected: 1"}"#,
+                     #"{"sessionKey":"a;b","organizationId":"123e4567-e89b-12d3-a456-426614174000"}"#] {
+            try write(text)
+            XCTAssertEqual(LegacyConfigFile.inspect(at: file), .unreadable, text)
+        }
+    }
+
     func testInspectReturnsCredentials() throws {
         try write(#"{"oauthToken":"tok"}"#)
         XCTAssertEqual(LegacyConfigFile.inspect(at: file), .credentials(WidgetConfig(oauthToken: "tok")))

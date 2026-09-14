@@ -7,8 +7,8 @@ final class UsageFetchingTests: XCTestCase {
 
     // MARK: Endpoints
 
-    func testOAuthRequestTargetsAnthropicWithBearerToken() {
-        let request = ClaudeEndpoints.oauthRequest(token: "tok")
+    func testOAuthRequestTargetsAnthropicWithBearerToken() throws {
+        let request = try XCTUnwrap(ClaudeEndpoints.oauthRequest(token: "tok"))
         XCTAssertEqual(request.url?.absoluteString, "https://api.anthropic.com/api/oauth/usage")
         XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer tok")
         XCTAssertEqual(request.value(forHTTPHeaderField: "anthropic-beta"), "oauth-2025-04-20")
@@ -22,6 +22,13 @@ final class UsageFetchingTests: XCTestCase {
         for bad in ["../../x", "abc/usage", "\(upper)/../../other", "\(upper)?a=b", ""] {
             XCTAssertNil(ClaudeEndpoints.sessionKeyRequest(sessionKey: "sk", organizationId: bad), bad)
         }
+    }
+
+    func testEndpointsRefuseCredentialsThatCouldBreakHeaders() {
+        XCTAssertNil(ClaudeEndpoints.oauthRequest(token: "tok\r\nX-Injected: 1"))
+        XCTAssertNil(ClaudeEndpoints.oauthRequest(token: "tok en"))
+        XCTAssertNil(ClaudeEndpoints.sessionKeyRequest(sessionKey: "a;b", organizationId: upper))
+        XCTAssertNil(ClaudeEndpoints.sessionKeyRequest(sessionKey: "a\nb", organizationId: upper))
     }
 
     // MARK: Parsing
@@ -61,7 +68,7 @@ final class UsageFetchingTests: XCTestCase {
 
     func testErrorMessagesAreShortFixedStrings() {
         let all: [UsageError] = [.noCredentials, .http(401), .http(403), .http(429), .http(503), .network,
-                                 .invalidResponse, .invalidOrganizationId, .keychain(-25293)]
+                                 .invalidResponse, .invalidOrganizationId, .invalidCredentials, .keychain(-25293)]
         for error in all {
             XCTAssertFalse(error.message.isEmpty)
             XCTAssertLessThan(error.message.count, 80, error.message)
@@ -143,6 +150,15 @@ final class UsageFetchingTests: XCTestCase {
         let recorder = Recorder([.success(okBody)])
         let result = await recorder.fetcher.fetch(config: WidgetConfig(sessionKey: "sk", organizationId: "../evil"))
         XCTAssertEqual(result.failure, .invalidOrganizationId)
+        XCTAssertTrue(recorder.requests.isEmpty)
+    }
+
+    func testStoredCredentialsThatCouldBreakHeadersAreNeverSent() async {
+        let recorder = Recorder([.success(okBody), .success(okBody)])
+        let badToken = await recorder.fetcher.fetch(config: WidgetConfig(oauthToken: "tok\r\nX-Injected: 1"))
+        XCTAssertEqual(badToken.failure, .invalidCredentials)
+        let badKey = await recorder.fetcher.fetch(config: WidgetConfig(sessionKey: "a;b", organizationId: upper))
+        XCTAssertEqual(badKey.failure, .invalidCredentials)
         XCTAssertTrue(recorder.requests.isEmpty)
     }
 

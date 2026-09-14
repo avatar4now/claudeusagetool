@@ -40,6 +40,17 @@ final class WidgetConfigTests: XCTestCase {
         }
     }
 
+    func testValidatedAppliesTheSameRulesAsSaveToStoredConfigs() throws {
+        XCTAssertThrowsError(try WidgetConfig(oauthToken: "abc\r\nX-Injected: 1").validated()) {
+            XCTAssertEqual($0 as? ConfigValidationError, .invalidToken)
+        }
+        XCTAssertThrowsError(try WidgetConfig(sessionKey: "a;b", organizationId: upper).validated()) {
+            XCTAssertEqual($0 as? ConfigValidationError, .invalidSessionKey)
+        }
+        XCTAssertEqual(try WidgetConfig(sessionKey: "sk", organizationId: upper).validated(),
+                       WidgetConfig(sessionKey: "sk", organizationId: lower))
+    }
+
     func testFromFieldsAllowsEverythingBlank() throws {
         XCTAssertTrue(try WidgetConfig.fromFields(oauthToken: "", sessionKey: "", organizationId: "").isEmpty)
     }

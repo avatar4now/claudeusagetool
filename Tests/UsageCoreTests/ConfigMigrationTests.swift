@@ -50,6 +50,14 @@ final class ConfigMigrationTests: XCTestCase {
         XCTAssertTrue(fileExists)
     }
 
+    func testTamperedFileIsNeitherImportedNorDeleted() throws {
+        try write(#"{"oauthToken":"abc\r\nX-Injected: 1"}"#)
+        let store = InMemoryStore()
+        XCTAssertEqual(ConfigMigration.run(store: store, fileURL: file), .keptUnreadableFile)
+        XCTAssertNil(store.stored)
+        XCTAssertTrue(fileExists)
+    }
+
     func testFileWithoutCredentialsIsRemoved() throws {
         try write("{\n\n}")
         XCTAssertEqual(ConfigMigration.run(store: InMemoryStore(), fileURL: file), .removedEmptyFile)

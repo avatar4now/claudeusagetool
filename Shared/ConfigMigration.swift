@@ -26,7 +26,10 @@ enum LegacyConfigFile {
         guard let data = try? Data(contentsOf: url), let config = try? WidgetConfig.decode(data) else {
             return .unreadable
         }
-        return config.isEmpty ? .empty : .credentials(config)
+        guard !config.isEmpty else { return .empty }
+        // Apply the same rules as Save, so a tampered file can't slip malformed values into the keychain.
+        guard let valid = try? config.validated() else { return .unreadable }
+        return .credentials(valid)
     }
 
     static func remove(at url: URL = url) throws {
@@ -59,7 +62,7 @@ enum ConfigMigration {
             case .keptConflictingFile:
                 return "An old config file has different credentials. Click Save to keep what's shown and delete it."
             case .keptUnreadableFile:
-                return "The old config file couldn't be read, so it was left in place."
+                return "The old config file was unreadable or had invalid values, so it was left in place."
             case .failed(let reason):
                 return reason
             }

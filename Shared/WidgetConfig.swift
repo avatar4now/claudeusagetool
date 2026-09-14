@@ -22,17 +22,26 @@ struct WidgetConfig: Codable, Equatable, Sendable {
 
     /// Builds a config from the app's text fields: trims whitespace, turns blanks into nil, and validates.
     static func fromFields(oauthToken: String?, sessionKey: String?, organizationId: String?) throws -> WidgetConfig {
-        let token = oauthToken?.trimmedNonEmpty
-        let key = sessionKey?.trimmedNonEmpty
-        let organization = organizationId?.trimmedNonEmpty
-
-        if let token, !token.isHeaderSafe { throw ConfigValidationError.invalidToken }
-        if let key, !key.isHeaderSafe || key.contains(";") { throw ConfigValidationError.invalidSessionKey }
-        if let organization, UUID(uuidString: organization) == nil { throw ConfigValidationError.invalidOrganizationId }
-        if key != nil, organization == nil { throw ConfigValidationError.missingOrganizationId }
-
-        return WidgetConfig(oauthToken: token, sessionKey: key, organizationId: organization?.lowercased())
+        try WidgetConfig(oauthToken: oauthToken?.trimmedNonEmpty,
+                         sessionKey: sessionKey?.trimmedNonEmpty,
+                         organizationId: organizationId?.trimmedNonEmpty).validated()
     }
+
+    /// Applies the Save rules to a config from anywhere (text fields, the old file, the keychain).
+    /// Returns it with the organization ID lowercased.
+    func validated() throws -> WidgetConfig {
+        if let oauthToken, !Self.isSafeToken(oauthToken) { throw ConfigValidationError.invalidToken }
+        if let sessionKey, !Self.isSafeSessionKey(sessionKey) { throw ConfigValidationError.invalidSessionKey }
+        if let organizationId, UUID(uuidString: organizationId) == nil { throw ConfigValidationError.invalidOrganizationId }
+        if sessionKey != nil, organizationId == nil { throw ConfigValidationError.missingOrganizationId }
+        return WidgetConfig(oauthToken: oauthToken, sessionKey: sessionKey, organizationId: organizationId?.lowercased())
+    }
+
+    /// A token must be visible ASCII only, so it can't split or extend the Authorization header.
+    static func isSafeToken(_ token: String) -> Bool { token.isHeaderSafe }
+
+    /// A session key has the same rule, and also can't contain ';', which would start a second cookie.
+    static func isSafeSessionKey(_ key: String) -> Bool { key.isHeaderSafe && !key.contains(";") }
 
     func encoded() throws -> Data {
         let encoder = JSONEncoder()
