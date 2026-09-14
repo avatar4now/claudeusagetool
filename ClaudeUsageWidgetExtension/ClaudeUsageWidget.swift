@@ -11,6 +11,8 @@ struct ClaudeUsageEntry: TimelineEntry {
     let fiveHourResetsAt: Date?
     let weeklyUtil: Int?
     let weeklyResetsAt: Date?
+    let fableUtil: Int?
+    let fableResetsAt: Date?
     let error: String?
 
     static var placeholder: ClaudeUsageEntry {
@@ -20,13 +22,27 @@ struct ClaudeUsageEntry: TimelineEntry {
             fiveHourResetsAt: Date().addingTimeInterval(3 * 3600),
             weeklyUtil: 28,
             weeklyResetsAt: Date().addingTimeInterval(3 * 86400),
+            fableUtil: 61,
+            fableResetsAt: Date().addingTimeInterval(3 * 86400),
             error: nil
         )
     }
 
+    /// Percentages are rounded down, matching Claude Code's /usage screen.
+    static func from(_ snapshot: UsageSnapshot) -> ClaudeUsageEntry {
+        ClaudeUsageEntry(date: Date(),
+                         fiveHourUtil: UsageFormatting.wholePercent(snapshot.fiveHourPercent),
+                         fiveHourResetsAt: snapshot.fiveHourResetsAt,
+                         weeklyUtil: UsageFormatting.wholePercent(snapshot.weeklyPercent),
+                         weeklyResetsAt: snapshot.weeklyResetsAt,
+                         fableUtil: UsageFormatting.wholePercent(snapshot.fableWeeklyPercent),
+                         fableResetsAt: snapshot.fableWeeklyResetsAt,
+                         error: nil)
+    }
+
     static func failure(_ error: UsageError) -> ClaudeUsageEntry {
-        ClaudeUsageEntry(date: Date(), fiveHourUtil: nil, fiveHourResetsAt: nil,
-                         weeklyUtil: nil, weeklyResetsAt: nil, error: error.message)
+        ClaudeUsageEntry(date: Date(), fiveHourUtil: nil, fiveHourResetsAt: nil, weeklyUtil: nil,
+                         weeklyResetsAt: nil, fableUtil: nil, fableResetsAt: nil, error: error.message)
     }
 }
 
@@ -37,6 +53,19 @@ struct ClaudeUsageEntry: TimelineEntry {
 private let logger = Logger(subsystem: "dev.huan.ClaudeUsageWidget", category: "widget")
 
 struct ClaudeAPIFetcher {
+    /// Shows the numbers the app fetched moments ago when they're fresh, and fetches directly otherwise
+    /// (for example when the app isn't running). Also returns the refresh interval chosen in the app.
+    static func currentEntry() async -> (entry: ClaudeUsageEntry, refreshSeconds: Int) {
+        KeychainCredentialStore.preventKeychainDialogs()
+        let state = KeychainUsageStateStore().load()
+        let refreshSeconds = RefreshSchedule.sanitized(state?.refreshSeconds)
+        if let snapshot = RefreshSchedule.freshSnapshot(in: state) {
+            logger.notice("Showing usage shared by the app")
+            return (.from(snapshot), refreshSeconds)
+        }
+        return (await fetchUsage(), refreshSeconds)
+    }
+
     static func fetchUsage() async -> ClaudeUsageEntry {
         // The widget runs in the background, so a keychain problem must become a message, never a dialog.
         KeychainCredentialStore.preventKeychainDialogs()
@@ -56,16 +85,9 @@ struct ClaudeAPIFetcher {
         logger.notice("Credentials loaded: oauth=\(config.oauthToken != nil, privacy: .public) sessionKey=\(config.sessionKey != nil, privacy: .public)")
 
         switch await UsageFetcher.live.fetch(config: config) {
-        case .success(let usage):
-            logger.notice("Usage fetched")
-            return ClaudeUsageEntry(
-                date: Date(),
-                fiveHourUtil: usage.fiveHourPercent.map { Int($0.rounded()) },
-                fiveHourResetsAt: usage.fiveHourResetsAt,
-                weeklyUtil: usage.weeklyPercent.map { Int($0.rounded()) },
-                weeklyResetsAt: usage.weeklyResetsAt,
-                error: nil
-            )
+        case .success(let report):
+            logger.notice("Usage fetched via \(String(describing: report.route), privacy: .public)")
+            return .from(report.snapshot)
         case .failure(let error):
             logger.error("Usage fetch failed: \(error.message, privacy: .public)")
             return .failure(error)
@@ -86,89 +108,33 @@ struct ClaudeUsageProvider: TimelineProvider {
             return
         }
         Task {
-            let entry = await ClaudeAPIFetcher.fetchUsage()
-            completion(entry)
+            completion(await ClaudeAPIFetcher.currentEntry().entry)
         }
     }
 
     func getTimeline(in context: Context, completion: @escaping (Timeline<ClaudeUsageEntry>) -> Void) {
         Task {
-            let entry = await ClaudeAPIFetcher.fetchUsage()
-            let next = Date().addingTimeInterval(5 * 60) // refresh every 5 min
+            let (entry, refreshSeconds) = await ClaudeAPIFetcher.currentEntry()
+            // While the app runs it also pushes a redraw after every refresh, so this is the fallback schedule.
+            let next = Date().addingTimeInterval(TimeInterval(refreshSeconds))
             completion(Timeline(entries: [entry], policy: .after(next)))
         }
     }
 }
 
-// MARK: - Color Helpers
-
-extension Color {
-    static func usageColor(for utilization: Int) -> Color {
-        switch utilization {
-        case 0..<30: return Color(red: 0.2, green: 0.8, blue: 0.4)   // green
-        case 30..<50: return Color(red: 0.4, green: 0.8, blue: 0.3)  // light green
-        case 50..<65: return Color(red: 0.9, green: 0.8, blue: 0.1)  // yellow
-        case 65..<80: return Color(red: 1.0, green: 0.6, blue: 0.1)  // orange
-        case 80..<90: return Color(red: 1.0, green: 0.3, blue: 0.2)  // red-orange
-        default:      return Color(red: 0.9, green: 0.1, blue: 0.1)  // red
-        }
-    }
-
-    static func progressGradient(for utilization: Int) -> LinearGradient {
-        let color = usageColor(for: utilization)
-        return LinearGradient(
-            colors: [color.opacity(0.7), color],
-            startPoint: .leading,
-            endPoint: .trailing
-        )
-    }
-}
-
 // MARK: - Subviews
 
-struct UsageProgressBar: View {
-    let utilization: Int
-    let height: CGFloat
-
-    var body: some View {
-        GeometryReader { geo in
-            ZStack(alignment: .leading) {
-                RoundedRectangle(cornerRadius: height / 2)
-                    .fill(Color.white.opacity(0.1))
-
-                RoundedRectangle(cornerRadius: height / 2)
-                    .fill(Color.progressGradient(for: utilization))
-                    .frame(width: max(0, geo.size.width * CGFloat(utilization) / 100.0))
-            }
-        }
-        .frame(height: height)
-    }
-}
+// Color.usageColor and UsageProgressBar live in Shared/UsageStyle.swift, so the menu bar uses the same look.
 
 struct CountdownText: View {
     let resetsAt: Date?
     let label: String
 
     var body: some View {
-        if let reset = resetsAt {
-            let remaining = reset.timeIntervalSince(Date())
-            if remaining > 0 {
-                let hours = Int(remaining) / 3600
-                let minutes = (Int(remaining) % 3600) / 60
-                if hours > 0 {
-                    Text("\(label) \(hours)h \(minutes)m")
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                } else {
-                    Text("\(label) \(minutes)m")
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                }
-            } else {
-                Text("\(label) now")
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(.secondary)
-            }
+        if let text = UsageFormatting.resetText(until: resetsAt) {
+            Text("\(label) \(text)")
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundStyle(.secondary)
         }
     }
 }
@@ -254,7 +220,7 @@ struct ClaudeUsageMediumView: View {
                 VStack(spacing: 6) {
                     ZStack {
                         Circle()
-                            .stroke(Color.white.opacity(0.1), lineWidth: 6)
+                            .stroke(Color.primary.opacity(0.12), lineWidth: 6)
                         Circle()
                             .trim(from: 0, to: CGFloat(entry.fiveHourUtil ?? 0) / 100.0)
                             .stroke(
@@ -286,18 +252,9 @@ struct ClaudeUsageMediumView: View {
                         Spacer()
                     }
 
-                    // Weekly
-                    VStack(alignment: .leading, spacing: 3) {
-                        HStack {
-                            Text("Weekly")
-                                .font(.system(size: 10, weight: .medium))
-                                .foregroundStyle(.secondary)
-                            Spacer()
-                            Text("\(entry.weeklyUtil ?? 0)%")
-                                .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                                .foregroundStyle(Color.usageColor(for: entry.weeklyUtil ?? 0))
-                        }
-                        UsageProgressBar(utilization: entry.weeklyUtil ?? 0, height: 5)
+                    MiniMetric(title: "Weekly", utilization: entry.weeklyUtil ?? 0)
+                    if let fable = entry.fableUtil {
+                        MiniMetric(title: "Fable weekly", utilization: fable)
                     }
 
                     // Reset times
@@ -368,6 +325,17 @@ struct ClaudeUsageLargeView: View {
                 )
                 .padding(.bottom, 12)
 
+                // Fable weekly card, shown when the account has a Fable limit
+                if let fable = entry.fableUtil {
+                    UsageCard(
+                        title: "Fable Weekly",
+                        utilization: fable,
+                        resetsAt: entry.fableResetsAt,
+                        barHeight: 8
+                    )
+                    .padding(.bottom, 12)
+                }
+
                 // Bottom stats
                 Spacer(minLength: 0)
                 HStack(spacing: 0) {
@@ -421,6 +389,27 @@ struct UsageCard: View {
             RoundedRectangle(cornerRadius: 8)
                 .fill(Color.white.opacity(0.05))
         )
+    }
+}
+
+/// A compact labeled bar for the medium widget.
+struct MiniMetric: View {
+    let title: String
+    let utilization: Int
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack {
+                Text(title)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text("\(utilization)%")
+                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(Color.usageColor(for: utilization))
+            }
+            UsageProgressBar(utilization: utilization, height: 5)
+        }
     }
 }
 

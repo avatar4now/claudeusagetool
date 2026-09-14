@@ -56,8 +56,37 @@ final class UsageFetchingTests: XCTestCase {
         XCTAssertEqual(snapshot.weeklyPercent, 21)
     }
 
+    /// Mirrors how Claude Code's /usage screen reads model-specific weekly limits.
+    func testParsesFableWeeklyFromTheScopedLimitsList() throws {
+        let snapshot = try UsageParser.parse(Data("""
+        {"five_hour":{"utilization":12},
+         "limits":[
+          {"kind":"spend","percent":98},
+          {"kind":"weekly_scoped","percent":70,"scope":{"model":{"display_name":"Opus"}}},
+          {"kind":"weekly_scoped","percent":61.5,"resets_at":"2026-09-18T12:00:00Z",
+           "scope":{"model":{"display_name":"Fable"}}}]}
+        """.utf8))
+        XCTAssertEqual(snapshot.fableWeeklyPercent, 61.5)
+        XCTAssertEqual(snapshot.fableWeeklyResetsAt, Date(timeIntervalSince1970: 1_789_732_800))
+    }
+
+    func testFableModelNameMatchesCaseInsensitively() throws {
+        let snapshot = try UsageParser.parse(Data("""
+        {"limits":[{"kind":"weekly_scoped","percent":0,"scope":{"model":{"display_name":"fable 5.1"}}}]}
+        """.utf8))
+        XCTAssertEqual(snapshot.fableWeeklyPercent, 0, "a Fable limit alone still counts as usage")
+    }
+
+    func testFableIsUnknownWhenTheResponseHasNoFableLimit() throws {
+        let snapshot = try UsageParser.parse(okBody)
+        XCTAssertNil(snapshot.fableWeeklyPercent)
+        XCTAssertNil(snapshot.fableWeeklyResetsAt)
+    }
+
     func testRejectsResponsesWithoutAnyUsage() {
-        for body in ["{}", "[]", "null", #"{"five_hour":null,"seven_day":{}}"#] {
+        let bodies = ["{}", "[]", "null", #"{"five_hour":null,"seven_day":{}}"#,
+                      #"{"limits":[{"kind":"weekly_scoped","percent":5,"scope":{"model":{"display_name":"Opus"}}}]}"#]
+        for body in bodies {
             XCTAssertThrowsError(try UsageParser.parse(Data(body.utf8)), body) {
                 XCTAssertEqual($0 as? UsageError, .invalidResponse)
             }
@@ -67,8 +96,9 @@ final class UsageFetchingTests: XCTestCase {
     // MARK: Errors
 
     func testErrorMessagesAreShortFixedStrings() {
-        let all: [UsageError] = [.noCredentials, .http(401), .http(403), .http(429), .http(503), .network,
-                                 .invalidResponse, .invalidOrganizationId, .invalidCredentials, .keychain(-25293)]
+        let all: [UsageError] = [.noCredentials, .tokenRejected, .tokenCannotReadUsage, .sessionKeyRejected,
+                                 .http(429), .http(503), .network, .invalidResponse, .invalidOrganizationId,
+                                 .invalidCredentials, .keychain(-25293)]
         for error in all {
             XCTAssertFalse(error.message.isEmpty)
             XCTAssertLessThan(error.message.count, 80, error.message)
@@ -76,7 +106,13 @@ final class UsageFetchingTests: XCTestCase {
         XCTAssertTrue(UsageError.http(503).message.contains("503"))
     }
 
-    // MARK: Fallback policy (tune this if needed, then update these expectations)
+    func testCredentialErrorsSayWhatToDoNext() {
+        XCTAssertTrue(UsageError.tokenCannotReadUsage.message.localizedCaseInsensitiveContains("session key"))
+        XCTAssertTrue(UsageError.sessionKeyRejected.message.localizedCaseInsensitiveContains("session key"))
+        XCTAssertTrue(UsageError.tokenRejected.message.contains("401"))
+    }
+
+    // MARK: Policies (tune these if needed, then update the expectations)
 
     func testFallsBackToTheSessionKeyOnlyWhenTheOAuthCredentialItselfIsRefused() {
         XCTAssertTrue(FallbackPolicy.shouldTrySessionKey(afterOAuthFailure: .http(401)))
@@ -84,6 +120,15 @@ final class UsageFetchingTests: XCTestCase {
         XCTAssertFalse(FallbackPolicy.shouldTrySessionKey(afterOAuthFailure: .network))
         XCTAssertFalse(FallbackPolicy.shouldTrySessionKey(afterOAuthFailure: .http(429)))
         XCTAssertFalse(FallbackPolicy.shouldTrySessionKey(afterOAuthFailure: .http(500)))
+    }
+
+    func testTemporaryProblemsKeepTheLastNumbersButCredentialProblemsClearThem() {
+        XCTAssertTrue(RefreshPolicy.keepsLastReport(after: .network))
+        XCTAssertTrue(RefreshPolicy.keepsLastReport(after: .http(429)))
+        XCTAssertTrue(RefreshPolicy.keepsLastReport(after: .http(503)))
+        XCTAssertFalse(RefreshPolicy.keepsLastReport(after: .noCredentials))
+        XCTAssertFalse(RefreshPolicy.keepsLastReport(after: .sessionKeyRejected))
+        XCTAssertFalse(RefreshPolicy.keepsLastReport(after: .tokenCannotReadUsage))
     }
 
     // MARK: Orchestration
@@ -101,6 +146,8 @@ final class UsageFetchingTests: XCTestCase {
         var hosts: [String] { requests.compactMap { $0.url?.host } }
     }
 
+    var both: WidgetConfig { WidgetConfig(oauthToken: "tok", sessionKey: "sk", organizationId: upper) }
+
     func testNoCredentialsMakesNoRequest() async {
         let recorder = Recorder([])
         let result = await recorder.fetcher.fetch(config: WidgetConfig())
@@ -110,40 +157,59 @@ final class UsageFetchingTests: XCTestCase {
 
     func testOAuthSuccessUsesOnlyTheAnthropicAPI() async {
         let recorder = Recorder([.success(okBody)])
-        let config = WidgetConfig(oauthToken: "tok", sessionKey: "sk", organizationId: upper)
-        let result = await recorder.fetcher.fetch(config: config)
-        XCTAssertEqual(result.success?.fiveHourPercent, 42)
+        let report = await recorder.fetcher.fetch(config: both).success
+        XCTAssertEqual(report?.snapshot.fiveHourPercent, 42)
+        XCTAssertEqual(report?.route, .oauthToken)
+        XCTAssertNil(report?.tokenFailure)
         XCTAssertEqual(recorder.hosts, ["api.anthropic.com"])
     }
 
-    func testRefusedOAuthTokenFallsBackToSessionKey() async {
-        let recorder = Recorder([.failure(.http(401)), .success(okBody)])
-        let config = WidgetConfig(oauthToken: "tok", sessionKey: "sk", organizationId: upper)
-        let result = await recorder.fetcher.fetch(config: config)
-        XCTAssertEqual(result.success?.weeklyPercent, 7)
+    func testTokenThatCannotReadUsageFallsBackToTheSessionKeyAndSaysWhy() async {
+        let recorder = Recorder([.failure(.http(403)), .success(okBody)])
+        let report = await recorder.fetcher.fetch(config: both).success
+        XCTAssertEqual(report?.snapshot.weeklyPercent, 7)
+        XCTAssertEqual(report?.route, .sessionKey)
+        XCTAssertEqual(report?.tokenFailure, .tokenCannotReadUsage)
         XCTAssertEqual(recorder.hosts, ["api.anthropic.com", "claude.ai"])
+    }
+
+    func testTokenOnlyFailuresAreNamedByCause() async {
+        let forbidden = await Recorder([.failure(.http(403))]).fetcher.fetch(config: WidgetConfig(oauthToken: "tok"))
+        XCTAssertEqual(forbidden.failure, .tokenCannotReadUsage)
+        let rejected = await Recorder([.failure(.http(401))]).fetcher.fetch(config: WidgetConfig(oauthToken: "tok"))
+        XCTAssertEqual(rejected.failure, .tokenRejected)
     }
 
     func testNetworkFailureDoesNotSpendTheSessionKey() async {
         let recorder = Recorder([.failure(.network)])
-        let config = WidgetConfig(oauthToken: "tok", sessionKey: "sk", organizationId: upper)
-        let result = await recorder.fetcher.fetch(config: config)
+        let result = await recorder.fetcher.fetch(config: both)
         XCTAssertEqual(result.failure, .network)
         XCTAssertEqual(recorder.hosts, ["api.anthropic.com"])
     }
 
-    func testWhenBothRoutesFailThePreferredRoutesErrorIsShown() async {
-        let recorder = Recorder([.failure(.http(401)), .failure(.http(500))])
-        let config = WidgetConfig(oauthToken: "tok", sessionKey: "sk", organizationId: upper)
-        let result = await recorder.fetcher.fetch(config: config)
-        XCTAssertEqual(result.failure, .http(401))
+    func testWhenBothRoutesFailTheSessionKeyErrorIsShown() async {
+        // The fallback only runs once the token is known not to work, so the session key is what still needs fixing.
+        let recorder = Recorder([.failure(.http(403)), .failure(.http(403))])
+        let result = await recorder.fetcher.fetch(config: both)
+        XCTAssertEqual(result.failure, .sessionKeyRejected)
     }
 
     func testSessionKeyAloneIsUsedDirectly() async {
         let recorder = Recorder([.success(okBody)])
-        let result = await recorder.fetcher.fetch(config: WidgetConfig(sessionKey: "sk", organizationId: upper))
-        XCTAssertNotNil(result.success)
+        let report = await recorder.fetcher.fetch(config: WidgetConfig(sessionKey: "sk", organizationId: upper)).success
+        XCTAssertEqual(report?.route, .sessionKey)
+        XCTAssertNil(report?.tokenFailure)
         XCTAssertEqual(recorder.hosts, ["claude.ai"])
+    }
+
+    func testExpiredSessionKeyIsNamedAndOtherFailuresPassThrough() async {
+        let config = WidgetConfig(sessionKey: "sk", organizationId: upper)
+        for code in [401, 403] {
+            let result = await Recorder([.failure(.http(code))]).fetcher.fetch(config: config)
+            XCTAssertEqual(result.failure, .sessionKeyRejected, "HTTP \(code)")
+        }
+        let limited = await Recorder([.failure(.http(429))]).fetcher.fetch(config: config)
+        XCTAssertEqual(limited.failure, .http(429))
     }
 
     func testStoredOrganizationIdThatIsNotAUUIDIsNeverSent() async {

@@ -35,19 +35,11 @@ struct KeychainCredentialStore: CredentialStoring {
     }
 
     private var baseQuery: [String: Any] {
-        [kSecClass as String: kSecClassGenericPassword,
-         kSecAttrService as String: service,
-         kSecAttrAccount as String: account]
+        keychainQuery(service: service, account: account)
     }
 
     func load() throws -> WidgetConfig? {
-        var query = baseQuery
-        query[kSecReturnData as String] = true
-        query[kSecMatchLimit as String] = kSecMatchLimitOne
-        var result: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        if status == errSecItemNotFound { return nil }
-        guard status == errSecSuccess, let data = result as? Data else { throw UsageError.keychain(status) }
+        guard let data = try readKeychainData(baseQuery) else { return nil }
         do {
             return try WidgetConfig.decode(data)
         } catch {
@@ -58,7 +50,7 @@ struct KeychainCredentialStore: CredentialStoring {
     func save(_ config: WidgetConfig) throws {
         let data = try config.encoded()
         // Build the access list first, so a problem there leaves the existing item untouched.
-        let access = try makeAccess()
+        let access = try makeKeychainAccess(label: Self.label, trusting: trustedBundleURLs)
         try delete()
         var query = baseQuery
         query[kSecValueData as String] = data
@@ -69,28 +61,93 @@ struct KeychainCredentialStore: CredentialStoring {
     }
 
     func delete() throws {
-        let status = SecItemDelete(baseQuery as CFDictionary)
-        guard status == errSecSuccess || status == errSecItemNotFound else { throw UsageError.keychain(status) }
+        try deleteKeychainItem(baseQuery)
+    }
+}
+
+/// The latest usage numbers and refresh interval, passed from the app to the widget.
+///
+/// These aren't secret. They live in the keychain only because it is the one store both sandboxed programs
+/// can reach without a provisioning profile, and they use the same two-program access list as the credentials.
+struct KeychainUsageStateStore {
+    var service = "dev.huan.ClaudeUsageWidget"
+    var account = "usage-state"
+    var trustedBundleURLs: [URL] = []
+
+    static let label = "Claude Usage Widget (latest usage)"
+
+    private var baseQuery: [String: Any] {
+        keychainQuery(service: service, account: account)
     }
 
-    /// An access list that trusts the calling program plus every bundle in `trustedBundleURLs`.
-    private func makeAccess() throws -> SecAccess {
-        var applications: [SecTrustedApplication] = []
-        var selfApplication: SecTrustedApplication?
-        var status = SecTrustedApplicationCreateFromPath(nil, &selfApplication)
-        guard status == errSecSuccess, let selfApplication else { throw UsageError.keychain(status) }
-        applications.append(selfApplication)
-
-        for url in trustedBundleURLs {
-            var application: SecTrustedApplication?
-            status = SecTrustedApplicationCreateFromPath(url.path, &application)
-            guard status == errSecSuccess, let application else { throw UsageError.keychain(status) }
-            applications.append(application)
-        }
-
-        var access: SecAccess?
-        status = SecAccessCreate(Self.label as CFString, applications as CFArray, &access)
-        guard status == errSecSuccess, let access else { throw UsageError.keychain(status) }
-        return access
+    /// Returns nil when there is nothing usable, so the widget falls back to fetching for itself.
+    func load() -> SharedUsageState? {
+        guard let data = try? readKeychainData(baseQuery) else { return nil }
+        return try? SharedUsageState.decode(data)
     }
+
+    /// Updates the item in place when it exists, which is cheaper than rebuilding its access list every refresh.
+    func save(_ state: SharedUsageState) throws {
+        let data = try state.encoded()
+        let updated = SecItemUpdate(baseQuery as CFDictionary, [kSecValueData as String: data] as CFDictionary)
+        if updated == errSecSuccess { return }
+        guard updated == errSecItemNotFound else { throw UsageError.keychain(updated) }
+
+        var query = baseQuery
+        query[kSecValueData as String] = data
+        query[kSecAttrAccess as String] = try makeKeychainAccess(label: Self.label, trusting: trustedBundleURLs)
+        query[kSecAttrLabel as String] = Self.label
+        let status = SecItemAdd(query as CFDictionary, nil)
+        guard status == errSecSuccess else { throw UsageError.keychain(status) }
+    }
+
+    func delete() throws {
+        try deleteKeychainItem(baseQuery)
+    }
+}
+
+// MARK: - Keychain helpers
+
+private func keychainQuery(service: String, account: String) -> [String: Any] {
+    [kSecClass as String: kSecClassGenericPassword,
+     kSecAttrService as String: service,
+     kSecAttrAccount as String: account]
+}
+
+/// The item's data, or nil when there is no such item.
+private func readKeychainData(_ baseQuery: [String: Any]) throws -> Data? {
+    var query = baseQuery
+    query[kSecReturnData as String] = true
+    query[kSecMatchLimit as String] = kSecMatchLimitOne
+    var result: CFTypeRef?
+    let status = SecItemCopyMatching(query as CFDictionary, &result)
+    if status == errSecItemNotFound { return nil }
+    guard status == errSecSuccess, let data = result as? Data else { throw UsageError.keychain(status) }
+    return data
+}
+
+private func deleteKeychainItem(_ baseQuery: [String: Any]) throws {
+    let status = SecItemDelete(baseQuery as CFDictionary)
+    guard status == errSecSuccess || status == errSecItemNotFound else { throw UsageError.keychain(status) }
+}
+
+/// An access list that trusts the calling program plus every bundle in `bundleURLs`.
+private func makeKeychainAccess(label: String, trusting bundleURLs: [URL]) throws -> SecAccess {
+    var applications: [SecTrustedApplication] = []
+    var selfApplication: SecTrustedApplication?
+    var status = SecTrustedApplicationCreateFromPath(nil, &selfApplication)
+    guard status == errSecSuccess, let selfApplication else { throw UsageError.keychain(status) }
+    applications.append(selfApplication)
+
+    for url in bundleURLs {
+        var application: SecTrustedApplication?
+        status = SecTrustedApplicationCreateFromPath(url.path, &application)
+        guard status == errSecSuccess, let application else { throw UsageError.keychain(status) }
+        applications.append(application)
+    }
+
+    var access: SecAccess?
+    status = SecAccessCreate(label as CFString, applications as CFArray, &access)
+    guard status == errSecSuccess, let access else { throw UsageError.keychain(status) }
+    return access
 }
