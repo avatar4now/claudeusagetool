@@ -49,7 +49,7 @@ struct ContentView: View {
                     Text("If you use Claude Code with OAuth, paste your token here.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    TextField("OAuth Bearer Token", text: $oauthToken)
+                    SecureField("OAuth Bearer Token", text: $oauthToken)
                         .textFieldStyle(.roundedBorder)
                         .font(.system(size: 12, design: .monospaced))
                 }
@@ -61,7 +61,7 @@ struct ContentView: View {
                     Text("Get your sessionKey from claude.ai browser cookies and your org ID from the API.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    TextField("Session Key (sk-ant-sid01-...)", text: $sessionKey)
+                    SecureField("Session Key (sk-ant-sid01-...)", text: $sessionKey)
                         .textFieldStyle(.roundedBorder)
                         .font(.system(size: 12, design: .monospaced))
                     TextField("Organization ID (uuid)", text: $organizationId)
@@ -116,7 +116,6 @@ struct ContentView: View {
                 withJSONObject: config.compactMapValues { $0 },
                 options: [.prettyPrinted, .sortedKeys]
             )
-            // Ensure .claude directory exists
             let dir = configURL.deletingLastPathComponent()
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             try data.write(to: configURL)
