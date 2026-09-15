@@ -32,7 +32,7 @@ struct ClaudeUsageWidgetApp: App {
             let _ = monitor.clock
             MenuBarLabel(headline: monitor.headline,
                          isStale: monitor.isStale,
-                         hasProblem: monitor.snapshot == nil && monitor.error != nil)
+                         problem: monitor.snapshot == nil ? monitor.error.map(ProblemCause.init) : nil)
         }
         .menuBarExtraStyle(.window)
     }

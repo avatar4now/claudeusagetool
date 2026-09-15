@@ -6,13 +6,13 @@ import SwiftUI
 struct MenuBarLabel: View {
     let headline: Headline
     let isStale: Bool
-    /// True when there are no numbers to show because something is wrong.
-    let hasProblem: Bool
+    /// Why there are no numbers to show, or nil when there are numbers (or nothing is wrong).
+    let problem: ProblemCause?
 
     /// The symbol says whether the number is current. The menu bar draws only the first image in a label, so a nearly
     /// full limit that isn't shown is flagged in the text instead, and a stale reading and a warning can both be seen.
     var symbol: String {
-        if hasProblem { return "exclamationmark.triangle" }
+        if let problem { return problem.symbol }
         if isStale { return "clock.badge.exclamationmark" }
         if headline.awaitingReset { return "arrow.clockwise" }
         return "gauge.with.dots.needle.33percent"
@@ -26,7 +26,7 @@ struct MenuBarLabel: View {
         if let warning = headline.hiddenWarningSummary { parts.append(warning) }
         if headline.awaitingReset { parts.append("waiting to confirm the reset") }
         if isStale { parts.append("data is out of date") }
-        if hasProblem { parts.append("needs attention") }
+        if let problem { parts.append(problem.title) }
         return parts.joined(separator: ", ")
     }
 
@@ -95,7 +95,7 @@ struct UsageMenuContent: View {
             }
             // A newer problem (for example after a manual retry during a long wait) is shown alongside the cooldown.
             if let error, !(activeCooldown != nil && error.isRateLimited) {
-                Label(error.message, systemImage: "exclamationmark.triangle.fill")
+                Label(error.message, systemImage: ProblemCause(error).symbol)
                     .font(.caption)
                     .foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)

@@ -298,14 +298,15 @@ final class UsageMonitor: ObservableObject {
         Task { await refresh(trigger: .automatic) }
     }
 
-    /// Shares the current numbers, cooldown, credential generation, latest problem, and a heartbeat with the widget,
-    /// then asks it to redraw. The heartbeat runs a little past the next wake-up; while it lasts the widget waits for
-    /// the app instead of sending its own request.
+    /// Shares the current numbers, cooldown, credential generation, latest problem and its cause, and a heartbeat with
+    /// the widget, then asks it to redraw. The heartbeat runs a little past the next wake-up; while it lasts the widget
+    /// waits for the app instead of sending its own request.
     private func publishToWidget(force: Bool = false) {
         let heartbeat = isTerminating ? nil : nextWake.map { max($0, Date()).addingTimeInterval(RefreshSchedule.grace + 30) }
         let state = SharedUsageState(refreshSeconds: refreshSeconds, snapshot: snapshot, fetchedAt: lastSuccessAt,
                                      cooldown: cooldown, credentialGeneration: generation,
-                                     appHeartbeatUntil: heartbeat, appErrorMessage: error?.message)
+                                     appHeartbeatUntil: heartbeat, appErrorMessage: error?.message,
+                                     appProblemCause: error.map(ProblemCause.init))
         guard force || state != lastPublished else { return }
         do {
             try sharedState.save(state)

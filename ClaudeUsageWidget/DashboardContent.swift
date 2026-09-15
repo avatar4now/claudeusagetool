@@ -111,7 +111,7 @@ struct DashboardContent: View {
                 .foregroundStyle(.orange)
         }
         if let error, !(cooldown.map { $0.until > now } ?? false && error.isRateLimited) {
-            Label(error.message, systemImage: "exclamationmark.triangle.fill")
+            Label(error.message, systemImage: ProblemCause(error).symbol)
                 .foregroundStyle(.orange)
         }
         HStack(spacing: 14) {

@@ -14,6 +14,8 @@ struct SharedUsageState: Codable, Equatable, Sendable {
     var appHeartbeatUntil: Date? = nil
     /// The app's latest problem, as fixed text, so the widget can show the same message without fetching.
     var appErrorMessage: String? = nil
+    /// The kind of problem behind appErrorMessage, so the widget can show the matching icon and title.
+    var appProblemCause: ProblemCause? = nil
     var schemaVersion: Int = SharedUsageState.currentSchemaVersion
 
     func encoded() throws -> Data { try JSONEncoder().encode(self) }
@@ -39,6 +41,9 @@ extension SharedUsageState {
         credentialGeneration = try container.decodeIfPresent(String.self, forKey: .credentialGeneration)
         appHeartbeatUntil = try container.decodeIfPresent(Date.self, forKey: .appHeartbeatUntil)
         appErrorMessage = try container.decodeIfPresent(String.self, forKey: .appErrorMessage)
+        // A cause this build doesn't know (from a newer app) is dropped rather than failing the whole state.
+        let causeText = (try? container.decodeIfPresent(String.self, forKey: .appProblemCause)) ?? nil
+        appProblemCause = causeText.flatMap(ProblemCause.init(rawValue:))
         schemaVersion = try container.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 1
     }
 }
@@ -131,8 +136,9 @@ struct CachedReading: Equatable, Sendable {
 enum WidgetPlan: Equatable, Sendable {
     /// The app's numbers are recent: show them.
     case showFresh(CachedReading)
-    /// The app is running and will publish soon: show what it last shared, with its latest problem, and don't fetch.
-    case waitForApp(cached: CachedReading?, notice: String?, until: Date)
+    /// The app is running and will publish soon: show what it last shared, with its latest problem and that problem's
+    /// cause, and don't fetch.
+    case waitForApp(cached: CachedReading?, notice: String?, cause: ProblemCause?, until: Date)
     /// A rate limit is in force: show the last numbers and wait.
     case waitForCooldown(cached: CachedReading?, until: Date)
     /// Nothing else applies: fetch, keeping the last numbers in case the fetch fails for an unclear reason.
@@ -144,7 +150,8 @@ enum WidgetPlan: Equatable, Sendable {
             return .showFresh(CachedReading(snapshot: fresh, fetchedAt: cached.fetchedAt))
         }
         if RefreshSchedule.matches(state, generation: generation), let heartbeat = state?.appHeartbeatUntil, heartbeat > now {
-            return .waitForApp(cached: cached, notice: state?.appErrorMessage, until: heartbeat)
+            let notice = state?.appErrorMessage
+            return .waitForApp(cached: cached, notice: notice, cause: notice == nil ? nil : state?.appProblemCause, until: heartbeat)
         }
         let blocking = [RefreshSchedule.matches(state, generation: generation) ? state?.cooldown : nil, widgetCooldown]
             .compactMap { $0 }

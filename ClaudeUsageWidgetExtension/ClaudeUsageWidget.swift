@@ -17,8 +17,8 @@ struct ClaudeUsageEntry: TimelineEntry {
     let refreshSeconds: Int
     /// A problem to show: on its own when there are no numbers, or under numbers that are being kept as stale.
     let notice: String?
-    /// True only for confirmed credential or setup problems, which need the user to open the app.
-    var noticeNeedsAction: Bool = false
+    /// What kind of problem the notice is about, for its icon and title. Nil when there is no notice.
+    var cause: ProblemCause? = nil
     /// When the next request may be sent, while a rate limit is in force.
     let nextAttempt: Date?
     /// When to check again because the app promised to publish by then.
@@ -35,13 +35,12 @@ struct ClaudeUsageEntry: TimelineEntry {
     /// The same data, drawn at a later moment (a reset time, or when it goes stale).
     func at(_ later: Date) -> ClaudeUsageEntry {
         ClaudeUsageEntry(date: later, snapshot: snapshot, fetchedAt: fetchedAt, refreshSeconds: refreshSeconds,
-                         notice: notice, noticeNeedsAction: noticeNeedsAction, nextAttempt: nextAttempt, reloadHint: reloadHint)
+                         notice: notice, cause: cause, nextAttempt: nextAttempt, reloadHint: reloadHint)
     }
 
     static func problem(_ error: UsageError, refreshSeconds: Int, now: Date, nextAttempt: Date? = nil) -> ClaudeUsageEntry {
         ClaudeUsageEntry(date: now, snapshot: nil, fetchedAt: nil, refreshSeconds: refreshSeconds,
-                         notice: error.message, noticeNeedsAction: !RefreshPolicy.keepsLastReport(after: error),
-                         nextAttempt: nextAttempt)
+                         notice: error.message, cause: ProblemCause(error), nextAttempt: nextAttempt)
     }
 
     static var placeholder: ClaudeUsageEntry {
@@ -123,17 +122,20 @@ struct ClaudeAPIFetcher {
             logger.notice("Showing usage shared by the app")
             return ClaudeUsageEntry(date: now, snapshot: reading.snapshot, fetchedAt: reading.fetchedAt,
                                     refreshSeconds: refreshSeconds, notice: nil, nextAttempt: nil)
-        case .waitForApp(let reading, let notice, let until):
+        case .waitForApp(let reading, let appNotice, let appCause, let until):
             logger.notice("The app is running; waiting for its next reading")
+            // The app's own problem comes first. With no problem and no reading yet, say the widget is waiting.
+            let notice = appNotice ?? (reading == nil ? "Waiting for the app's first reading." : nil)
+            let cause = appNotice != nil ? appCause : (reading == nil ? .waiting : nil)
             return ClaudeUsageEntry(date: now, snapshot: reading?.snapshot, fetchedAt: reading?.fetchedAt,
-                                    refreshSeconds: refreshSeconds,
-                                    notice: notice ?? (reading == nil ? "Waiting for the app's first reading." : nil),
+                                    refreshSeconds: refreshSeconds, notice: notice, cause: cause,
                                     nextAttempt: nil, reloadHint: until)
         case .waitForCooldown(let reading, let until):
             logger.notice("Waiting out a rate limit before fetching")
             return ClaudeUsageEntry(date: now, snapshot: reading?.snapshot, fetchedAt: reading?.fetchedAt,
                                     refreshSeconds: refreshSeconds,
-                                    notice: UsageError.rateLimited(retryAfter: nil).message, nextAttempt: until)
+                                    notice: UsageError.rateLimited(retryAfter: nil).message, cause: .rateLimited,
+                                    nextAttempt: until)
         case .fetch(let reading):
             cached = reading
         }
@@ -154,7 +156,8 @@ struct ClaudeAPIFetcher {
             }
             if RefreshPolicy.keepsLastReport(after: error), let cached {
                 return ClaudeUsageEntry(date: now, snapshot: cached.snapshot, fetchedAt: cached.fetchedAt,
-                                        refreshSeconds: refreshSeconds, notice: error.message, nextAttempt: nextAttempt)
+                                        refreshSeconds: refreshSeconds, notice: error.message, cause: ProblemCause(error),
+                                        nextAttempt: nextAttempt)
             }
             return .problem(error, refreshSeconds: refreshSeconds, now: now, nextAttempt: nextAttempt)
         }
@@ -216,7 +219,7 @@ struct StatusLine: View {
 
     var body: some View {
         if let notice = entry.notice {
-            Text(notice)
+            Label(notice, systemImage: entry.cause?.symbol ?? ProblemCause.fallbackSymbol)
                 .font(.system(size: size - 1))
                 .foregroundStyle(.orange)
                 .lineLimit(2)
@@ -235,46 +238,85 @@ struct StatusLine: View {
     }
 }
 
-/// Shown when there are no numbers at all.
+/// Shown when there are no numbers at all: the cause's icon, a short title, then the message.
 struct ProblemView: View {
     let message: String
     let style: Style
-    var needsAction: Bool = false
+    var cause: ProblemCause? = nil
 
     enum Style { case small, medium, large }
+
+    private var symbol: String {
+        cause?.symbol ?? ProblemCause.fallbackSymbol
+    }
+
+    private var needsAction: Bool {
+        cause?.needsAction ?? false
+    }
+
+    /// Orange means "open the app and fix this", yellow means "this should clear up by itself",
+    /// and gray means nothing is wrong yet.
+    private var tint: Color {
+        if needsAction { return .orange }
+        return cause == .waiting ? .secondary : .yellow
+    }
 
     var body: some View {
         switch style {
         case .small:
-            VStack(spacing: 6) {
-                Image(systemName: "exclamationmark.triangle")
+            VStack(spacing: 4) {
+                Image(systemName: symbol)
                     .font(.title2)
-                    .foregroundStyle(.yellow)
+                    .foregroundStyle(tint)
+                    .padding(.bottom, 2)
+                if let cause {
+                    Text(cause.title)
+                        .font(.system(size: 11, weight: .bold))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                }
                 Text(message)
                     .font(.system(size: 9))
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
+                    .lineLimit(5)
+                    .minimumScaleFactor(0.8)
             }
             .padding(12)
         case .medium:
-            HStack {
-                Image(systemName: "exclamationmark.triangle")
-                    .font(.title2)
-                    .foregroundStyle(.yellow)
-                Text(message)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
+            HStack(spacing: 12) {
+                Image(systemName: symbol)
+                    .font(.title)
+                    .foregroundStyle(tint)
+                VStack(alignment: .leading, spacing: 3) {
+                    if let cause {
+                        Text(cause.title)
+                            .font(.system(size: 13, weight: .bold))
+                            .lineLimit(1)
+                    }
+                    Text(message)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(3)
+                        .minimumScaleFactor(0.8)
+                }
             }
             .padding()
         case .large:
             VStack(spacing: 12) {
-                Image(systemName: "exclamationmark.triangle")
+                Image(systemName: symbol)
                     .font(.largeTitle)
-                    .foregroundStyle(.yellow)
-                Text(message)
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
+                    .foregroundStyle(tint)
+                VStack(spacing: 4) {
+                    if let cause {
+                        Text(cause.title)
+                            .font(.system(size: 15, weight: .bold))
+                    }
+                    Text(message)
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                }
                 if needsAction {
                     Text("Open the Claude Usage Widget app to fix this.")
                         .font(.system(size: 10))
@@ -293,7 +335,7 @@ struct ClaudeUsageSmallView: View {
 
     var body: some View {
         if entry.snapshot == nil {
-            ProblemView(message: entry.notice ?? "No usage yet.", style: .small, needsAction: entry.noticeNeedsAction)
+            ProblemView(message: entry.notice ?? "No usage yet.", style: .small, cause: entry.cause)
         } else {
             let fiveHour = entry.display(.fiveHour)
             let weekly = entry.display(.weekly)
@@ -352,7 +394,7 @@ struct ClaudeUsageMediumView: View {
 
     var body: some View {
         if entry.snapshot == nil {
-            ProblemView(message: entry.notice ?? "No usage yet.", style: .medium, needsAction: entry.noticeNeedsAction)
+            ProblemView(message: entry.notice ?? "No usage yet.", style: .medium, cause: entry.cause)
         } else {
             let fiveHour = entry.display(.fiveHour)
             let weekly = entry.display(.weekly)
@@ -441,7 +483,7 @@ struct ClaudeUsageLargeView: View {
 
     var body: some View {
         if entry.snapshot == nil {
-            ProblemView(message: entry.notice ?? "No usage yet.", style: .large, needsAction: entry.noticeNeedsAction)
+            ProblemView(message: entry.notice ?? "No usage yet.", style: .large, cause: entry.cause)
         } else {
             let fiveHour = entry.display(.fiveHour)
             let weekly = entry.display(.weekly)
@@ -477,7 +519,7 @@ struct ClaudeUsageLargeView: View {
 
                 Spacer(minLength: 0)
                 if let notice = entry.notice {
-                    Label(notice, systemImage: "exclamationmark.triangle.fill")
+                    Label(notice, systemImage: entry.cause?.symbol ?? ProblemCause.fallbackSymbol)
                         .font(.system(size: 11))
                         .foregroundStyle(.orange)
                         .lineLimit(2)

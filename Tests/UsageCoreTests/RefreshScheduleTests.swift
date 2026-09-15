@@ -58,7 +58,8 @@ final class RefreshScheduleTests: XCTestCase {
                                      cooldown: Cooldown(until: now.addingTimeInterval(90), fromServer: true, needsReview: false),
                                      credentialGeneration: "gen",
                                      appHeartbeatUntil: now.addingTimeInterval(210),
-                                     appErrorMessage: UsageError.network.message)
+                                     appErrorMessage: UsageError.network.message,
+                                     appProblemCause: .offline)
         XCTAssertEqual(try SharedUsageState.decode(try state.encoded()), state)
         XCTAssertEqual(state.schemaVersion, SharedUsageState.currentSchemaVersion)
     }
@@ -69,8 +70,23 @@ final class RefreshScheduleTests: XCTestCase {
         XCTAssertEqual(decoded.schemaVersion, 1)
         XCTAssertNil(decoded.credentialGeneration)
         XCTAssertNil(decoded.cooldown)
+        XCTAssertNil(decoded.appProblemCause)
 
         let newer = Data(#"{"refreshSeconds":120,"schemaVersion":99}"#.utf8)
         XCTAssertThrowsError(try SharedUsageState.decode(newer))
+    }
+
+    func testAProblemCauseFromANewerBuildDecodesAsNilWithoutLosingTheRest() throws {
+        let known = Data(#"{"refreshSeconds":120,"schemaVersion":2,"appErrorMessage":"x","appProblemCause":"botCheck"}"#.utf8)
+        XCTAssertEqual(try SharedUsageState.decode(known).appProblemCause, .botCheck)
+
+        let unknown = Data(#"{"refreshSeconds":60,"schemaVersion":2,"appErrorMessage":"x","appProblemCause":"somethingNew"}"#.utf8)
+        let decoded = try SharedUsageState.decode(unknown)
+        XCTAssertNil(decoded.appProblemCause)
+        XCTAssertEqual(decoded.refreshSeconds, 60)
+        XCTAssertEqual(decoded.appErrorMessage, "x")
+
+        let wrongType = Data(#"{"refreshSeconds":60,"appProblemCause":7}"#.utf8)
+        XCTAssertNil(try SharedUsageState.decode(wrongType).appProblemCause)
     }
 }
