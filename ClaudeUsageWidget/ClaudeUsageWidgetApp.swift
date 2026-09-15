@@ -13,6 +13,7 @@ struct ClaudeUsageWidgetApp: App {
         Window("Claude Usage", id: AppWindow.dashboard) {
             Dashboard(monitor: monitor)
         }
+        .defaultSize(width: 940, height: 960)
         .windowResizability(.contentMinSize)
         .defaultLaunchBehavior(AppLaunch.showsSettingsAtLaunch ? .suppressed : .presented)
         .restorationBehavior(.disabled)

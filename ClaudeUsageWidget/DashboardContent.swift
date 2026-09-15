@@ -326,7 +326,7 @@ struct DailyStats: View {
 
     var body: some View {
         let tracked = days.filter(\.hasReadings)
-        let busiest = tracked.max { $0.weeklyPoints < $1.weeklyPoints }
+        let busiest = tracked.filter { $0.weeklyPoints > 0 }.max { $0.weeklyPoints < $1.weeklyPoints }
         let averageWeekly = tracked.isEmpty ? 0 : tracked.map(\.weeklyPoints).reduce(0, +) / Double(tracked.count)
         let sessions = days.map(\.fiveHourSessionsOverNinety).reduce(0, +)
         VStack(alignment: .leading, spacing: 8) {
