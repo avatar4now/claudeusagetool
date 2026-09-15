@@ -61,6 +61,18 @@ struct DashboardContent: View {
         snapshot?.fableWeeklyPercent != nil || samples.contains { $0.fable != nil }
     }
 
+    /// The limits with a card: the 5-hour and weekly limits, plus Fable when the service reports it.
+    private var visibleLimits: [LimitKind] {
+        LimitKind.allCases.filter { $0 != .fableWeekly || snapshot?.fableWeeklyPercent != nil }
+    }
+
+    /// Where each visible limit is heading, from the same numbers the limit cards use.
+    private var forecasts: [LimitKind: ForecastOutcome] {
+        Dictionary(uniqueKeysWithValues: visibleLimits.map {
+            ($0, UsageForecast.make($0, snapshot: snapshot, samples: samples, now: now, isStale: isStale))
+        })
+    }
+
     var body: some View {
         if scrolls {
             ScrollView { page }
@@ -70,12 +82,17 @@ struct DashboardContent: View {
     }
 
     private var page: some View {
-        VStack(alignment: .leading, spacing: 18) {
+        // Worked out once per redraw and shared by the forecast card and the week chart.
+        let outcomes = forecasts
+        return VStack(alignment: .leading, spacing: 18) {
             header
             currentLimits
+            ForecastCard(rows: visibleLimits.map { kind in
+                ForecastRow.make(outcomes[kind] ?? .unavailable, kind: kind, now: now, calendar: calendar)
+            })
             dailyCard
             HStack(alignment: .top, spacing: 18) {
-                thisWeekCard
+                thisWeekCard(forecasts: outcomes)
                 fiveHourCard
             }
             footer
@@ -115,7 +132,7 @@ struct DashboardContent: View {
                 .foregroundStyle(.orange)
         }
         HStack(spacing: 14) {
-            ForEach(LimitKind.allCases.filter { $0 != .fableWeekly || snapshot?.fableWeeklyPercent != nil }, id: \.self) { kind in
+            ForEach(visibleLimits, id: \.self) { kind in
                 DashboardLimitCard(display: LimitDisplay.make(kind, snapshot: snapshot, now: now, isStale: isStale), dimmed: isStale)
             }
         }
@@ -155,7 +172,7 @@ struct DashboardContent: View {
 
     // MARK: This week and the five-hour session
 
-    private var thisWeekCard: some View {
+    private func thisWeekCard(forecasts: [LimitKind: ForecastOutcome]) -> some View {
         DashboardCard {
             Text("This week")
                 .font(.headline)
@@ -163,13 +180,21 @@ struct DashboardContent: View {
                 Text("Resets \(week.end.formatted(.dateTime.weekday(.abbreviated).hour().minute()))")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                WeekChart(week: week, showFable: hasFable, now: now)
+                WeekChart(week: week, showFable: hasFable, now: now,
+                          weeklyProjection: projection(forecasts[.weekly], within: week),
+                          fableProjection: projection(forecasts[.fableWeekly], within: week))
                     .frame(height: 200)
             } else {
                 EmptyHistory(isHistoryEnabled: isHistoryEnabled)
                     .frame(height: 200)
             }
         }
+    }
+
+    /// The dashed forecast line for one limit, or nothing when there is no forecast.
+    private func projection(_ outcome: ForecastOutcome?, within week: WeekSeries) -> [SeriesPoint] {
+        guard case .forecast(let forecast) = outcome else { return [] }
+        return forecast.projection(now: now, within: week)
     }
 
     private var fiveHourCard: some View {
@@ -253,6 +278,85 @@ struct DashboardLimitCard: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(display.kind.title), \(display.percent.map { "\($0) percent used" } ?? "not reported")"
                             + (detail.isEmpty ? "" : ", \(detail)"))
+    }
+}
+
+/// "If you keep using Claude at the same pace": one row per limit with a status chip, when it runs out, and a budget.
+struct ForecastCard: View {
+    let rows: [ForecastRow]
+
+    var body: some View {
+        DashboardCard {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Forecast")
+                    .font(.headline)
+                Text("If you keep using Claude at the same pace")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            ForEach(Array(rows.enumerated()), id: \.element.kind) { index, row in
+                if index > 0 { Divider() }
+                ForecastRowView(row: row)
+            }
+        }
+    }
+}
+
+struct ForecastRowView: View {
+    let row: ForecastRow
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 20) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(row.kind.title)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                ForecastChip(status: row.status)
+            }
+            .frame(width: 180, alignment: .leading)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(row.headline)
+                    .font(.body.weight(.medium))
+                if let detail = row.detail {
+                    Text(detail)
+                        .font(.callout)
+                }
+                if let basis = row.basis {
+                    Text(basis)
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(row.accessibilityLabel)
+    }
+}
+
+/// A small colored label: red when the limit runs out or is used up, orange when close, green when it should last.
+struct ForecastChip: View {
+    let status: ForecastStatus
+
+    private var color: Color {
+        switch status {
+        case .runsOut, .limitReached: return .red
+        case .cuttingItClose: return .orange
+        case .shouldLast: return .green
+        case .tooEarly, .noUsageYet, .unavailable: return .secondary
+        }
+    }
+
+    var body: some View {
+        Text(status.title)
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(color)
+            .lineLimit(1)
+            .fixedSize()
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(Capsule().fill(color.opacity(0.15)))
     }
 }
 
@@ -368,6 +472,13 @@ struct WeekChart: View {
     let week: WeekSeries
     let showFable: Bool
     let now: Date
+    /// Dashed lines from now to where each limit is heading, already clipped to the week.
+    var weeklyProjection: [SeriesPoint] = []
+    var fableProjection: [SeriesPoint] = []
+
+    private var hasProjection: Bool {
+        !weeklyProjection.isEmpty || (showFable && !fableProjection.isEmpty)
+    }
 
     var body: some View {
         Chart {
@@ -390,6 +501,19 @@ struct WeekChart: View {
                         .interpolationMethod(.monotone)
                 }
             }
+
+            ForEach(weeklyProjection) { point in
+                LineMark(x: .value("Time", point.at), y: .value("Percent", point.value), series: .value("Line", "All models forecast"))
+                    .foregroundStyle(DashboardPalette.allModels.opacity(0.55))
+                    .lineStyle(StrokeStyle(lineWidth: 2, dash: [5, 4]))
+            }
+            if showFable {
+                ForEach(fableProjection) { point in
+                    LineMark(x: .value("Time", point.at), y: .value("Percent", point.value), series: .value("Line", "Fable forecast"))
+                        .foregroundStyle(DashboardPalette.fable.opacity(0.55))
+                        .lineStyle(StrokeStyle(lineWidth: 2, dash: [5, 4]))
+                }
+            }
             RuleMark(x: .value("Now", now))
                 .foregroundStyle(Color.primary.opacity(0.35))
                 .annotation(position: .top, alignment: .leading) {
@@ -410,7 +534,8 @@ struct WeekChart: View {
                 AxisValueLabel(format: .dateTime.weekday(.narrow))
             }
         }
-        .accessibilityLabel("Weekly and Fable percentages this week compared with an even pace")
+        .accessibilityLabel("Weekly and Fable percentages this week compared with an even pace"
+                            + (hasProjection ? ", with dashed lines showing where they're heading" : ""))
     }
 }
 
