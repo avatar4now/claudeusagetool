@@ -56,6 +56,7 @@ struct UsageMenuContent: View {
     let now: Date
     var onChangeRefreshInterval: (Int) -> Void = { _ in }
     var onRefresh: () -> Void = {}
+    var onOpenDashboard: () -> Void = {}
     var onOpenSettings: () -> Void = {}
     var onQuit: () -> Void = {}
 
@@ -124,16 +125,19 @@ struct UsageMenuContent: View {
 
             Divider()
 
-            HStack {
+            HStack(spacing: 6) {
                 Button("Refresh", action: onRefresh)
                     .disabled(isRefreshing)
                     .keyboardShortcut("r")
+                Button("Dashboard", action: onOpenDashboard)
+                    .keyboardShortcut("d")
                 Button("Settings…", action: onOpenSettings)
                     .keyboardShortcut(",")
                 Spacer()
                 Button("Quit", action: onQuit)
                     .keyboardShortcut("q")
             }
+            .controlSize(.small)
 
             Text(version)
                 .font(.caption2)

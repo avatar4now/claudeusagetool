@@ -28,6 +28,13 @@ final class UsageMonitor: ObservableObject {
     @Published private(set) var menuBarMetric: MenuBarMetric
     /// Ticks every 30 seconds so the menu bar label re-evaluates staleness and reset times between fetches.
     @Published private(set) var clock = Date()
+    /// Changes whenever a reading is added to (or cleared from) the history, so the dashboard reloads.
+    @Published private(set) var historyRevision = 0
+    @Published private(set) var isHistoryEnabled: Bool
+
+    /// The dashboard's history file, inside this app's sandbox container.
+    let history = UsageHistoryStore.appDefault
+    private var lastRecorded: UsageSample?
 
     let store: KeychainCredentialStore
     private let sharedState: KeychainUsageStateStore
@@ -42,6 +49,7 @@ final class UsageMonitor: ObservableObject {
 
     private static let refreshKey = "refreshSeconds"
     private static let metricKey = "menuBarMetric"
+    private static let historyKey = "keepHistory"
 
     init() {
         store = .forThisApp
@@ -49,6 +57,7 @@ final class UsageMonitor: ObservableObject {
         let defaults = UserDefaults.standard
         refreshSeconds = RefreshSchedule.sanitized(defaults.object(forKey: Self.refreshKey) as? Int)
         menuBarMetric = MenuBarMetric(rawValue: defaults.string(forKey: Self.metricKey) ?? "") ?? .auto
+        isHistoryEnabled = defaults.object(forKey: Self.historyKey) as? Bool ?? true
 
         // Credentials saved before version 1.3 have no generation. Give them one, so cached numbers can be matched
         // to them and the widget can reuse the app's readings instead of fetching again.
@@ -74,6 +83,11 @@ final class UsageMonitor: ObservableObject {
         }
         lastPublished = state
         logger.notice("Launched: cached reading \(self.snapshot != nil, privacy: .public), cooldown \(self.cooldown != nil, privacy: .public)")
+
+        if isHistoryEnabled {
+            try? history.compact(now: Date())
+            lastRecorded = history.load(now: Date()).last
+        }
 
         scheduleNextRefresh()
         // Publishing the heartbeat also asks WidgetKit to redraw, which picks up a new build of the widget.
@@ -118,6 +132,37 @@ final class UsageMonitor: ObservableObject {
         logger.notice("Refresh interval set to \(value, privacy: .public) seconds")
         scheduleNextRefresh()
         publishToWidget()
+    }
+
+    /// Turns the usage history on or off. Turning it off keeps what's saved until Clear History is used.
+    func setHistoryEnabled(_ enabled: Bool) {
+        isHistoryEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: Self.historyKey)
+    }
+
+    func clearHistory() {
+        do {
+            try history.clear()
+            lastRecorded = nil
+            historyRevision += 1
+            logger.notice("History cleared")
+        } catch {
+            logger.error("Couldn't clear the history file")
+        }
+    }
+
+    /// Saves a reading for the dashboard when enough time has passed or something changed meaningfully.
+    private func recordHistory(_ snapshot: UsageSnapshot, at date: Date) {
+        guard isHistoryEnabled else { return }
+        let sample = UsageSample(snapshot: snapshot, at: date)
+        guard HistoryPolicy.shouldRecord(sample, after: lastRecorded) else { return }
+        do {
+            try history.append(sample)
+            lastRecorded = sample
+            historyRevision += 1
+        } catch {
+            logger.error("Couldn't save a history reading")
+        }
     }
 
     func setMenuBarMetric(_ metric: MenuBarMetric) {
@@ -166,9 +211,11 @@ final class UsageMonitor: ObservableObject {
 
         switch outcome.result {
         case .success(let report):
+            let fetchedAt = Date()
             snapshot = report.snapshot
-            lastSuccessAt = Date()
+            lastSuccessAt = fetchedAt
             error = nil
+            recordHistory(report.snapshot, at: fetchedAt)
             consecutiveRateLimits = 0
             lastRateLimitAt = nil
             cooldown = nil
@@ -291,7 +338,25 @@ extension KeychainUsageStateStore {
 }
 
 enum AppWindow {
+    static let dashboard = "dashboard"
     static let settings = "settings"
+}
+
+/// Shows the app in the Dock and app switcher while any of its windows is open, and hides it again when they close.
+@MainActor
+enum WindowPresence {
+    private static var openCount = 0
+
+    static func opened() {
+        openCount += 1
+        NSApplication.shared.setActivationPolicy(.regular)
+        NSApplication.shared.activate()
+    }
+
+    static func closed() {
+        openCount = max(0, openCount - 1)
+        if openCount == 0 { NSApplication.shared.setActivationPolicy(.accessory) }
+    }
 }
 
 enum AppLaunch {

@@ -6,7 +6,7 @@ import os
 /// Logs outcomes only, never credential values.
 private let logger = Logger(subsystem: "dev.huan.ClaudeUsageWidget", category: "app")
 
-struct ContentView: View {
+struct SettingsView: View {
     @ObservedObject var monitor: UsageMonitor
     @ObservedObject var loginItem: LoginItemController
 
@@ -16,10 +16,13 @@ struct ContentView: View {
     @State private var statusMessage = ""
     @State private var isSuccess = false
     @State private var isChecking = false
+    @State private var confirmingClearHistory = false
+    @State private var historySummary = ""
 
     private static let organizationsURL = URL(string: "https://claude.ai/api/organizations")!
 
     var body: some View {
+        ScrollView {
         VStack(spacing: 18) {
             // Header
             HStack(spacing: 10) {
@@ -29,7 +32,7 @@ struct ContentView: View {
                 VStack(alignment: .leading) {
                     Text("Claude Usage Widget")
                         .font(.title2.bold())
-                    Text("Configure your credentials")
+                    Text("Settings")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -114,6 +117,35 @@ struct ContentView: View {
                 .padding(8)
             }
 
+            GroupBox("Usage history") {
+                VStack(alignment: .leading, spacing: 8) {
+                    Toggle("Keep a history of readings for the dashboard", isOn: Binding(get: { monitor.isHistoryEnabled },
+                                                                                       set: { monitor.setHistoryEnabled($0) }))
+                    Text("Percentages and reset times only, saved on this Mac for 90 days. Nothing is sent anywhere.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    HStack {
+                        Text(historySummary)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Clear History…") { confirmingClearHistory = true }
+                            .controlSize(.small)
+                    }
+                }
+                .font(.callout)
+                .padding(8)
+            }
+            .confirmationDialog("Clear all saved usage history?", isPresented: $confirmingClearHistory) {
+                Button("Clear History", role: .destructive) {
+                    monitor.clearHistory()
+                    updateHistorySummary()
+                }
+            } message: {
+                Text("The dashboard's charts start again from the next reading. This can't be undone.")
+            }
+
             // Status
             if !statusMessage.isEmpty {
                 HStack(spacing: 6) {
@@ -160,16 +192,26 @@ struct ContentView: View {
             }
         }
         .padding(24)
-        .frame(minWidth: 560, minHeight: 720)
+        }
+        .frame(minWidth: 580, minHeight: 640, idealHeight: 860)
         .onAppear {
             loadConfig()
             loginItem.refresh()
-            // The app normally lives only in the menu bar. While Settings is open it also shows in the Dock and app switcher.
-            NSApplication.shared.setActivationPolicy(.regular)
-            NSApplication.shared.activate()
+            updateHistorySummary()
+            WindowPresence.opened()
         }
         .onDisappear {
-            NSApplication.shared.setActivationPolicy(.accessory)
+            WindowPresence.closed()
+        }
+        .onChange(of: monitor.historyRevision) { updateHistorySummary() }
+    }
+
+    private func updateHistorySummary() {
+        let samples = monitor.history.load(now: Date())
+        if let first = samples.first {
+            historySummary = "\(samples.count) readings since \(first.at.formatted(date: .abbreviated, time: .omitted))"
+        } else {
+            historySummary = "No readings saved yet"
         }
     }
 

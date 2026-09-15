@@ -20,6 +20,10 @@ struct UsageMenu: View {
                 now: context.date,
                 onChangeRefreshInterval: { monitor.setRefreshInterval($0) },
                 onRefresh: { Task { await monitor.refresh(trigger: .manual) } },
+                onOpenDashboard: {
+                    openWindow(id: AppWindow.dashboard)
+                    NSApplication.shared.activate()
+                },
                 onOpenSettings: {
                     openWindow(id: AppWindow.settings)
                     NSApplication.shared.activate()
