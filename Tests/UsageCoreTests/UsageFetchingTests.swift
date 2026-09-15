@@ -168,6 +168,13 @@ final class UsageFetchingTests: XCTestCase {
                        .sessionKeyRejected)
         XCTAssertEqual(classify(failure(403, contentType: "text/html", cf: "challenge", body: "<html></html>")), .blockedByCloudflare)
         XCTAssertEqual(classify(failure(403, contentType: "text/html; charset=UTF-8", body: cloudflarePage)), .blockedByCloudflare)
+        let paddedChallenge = #"<!DOCTYPE html><html lang="en-US"><head><title>Just a moment...</title><style>"#
+            + String(repeating: "x", count: 20_000) + #"</style><script src="/cdn-cgi/challenge-platform/h/g/orchestrate/chl_page/v1"></script>"#
+        XCTAssertEqual(classify(HTTPFailure(status: 403, contentType: "text/html", cfMitigated: nil, retryAfter: nil,
+                                            bodyPrefix: Data(paddedChallenge.utf8.prefix(HTTPFailure.bodyLimit)))),
+                       .blockedByCloudflare, "real challenge pages put the script tag after a large style block")
+        XCTAssertEqual(classify(failure(403, contentType: "text/html", body: "<html><script>window._cf_chl_opt={}</script></html>")),
+                       .blockedByCloudflare)
         XCTAssertEqual(classify(failure(403, contentType: "text/html", body: "<html>Forbidden</html>")), .accessDenied(403),
                        "an HTML page alone is not proof of a bot check")
         XCTAssertEqual(classify(failure(403, body: #"{"type":"error","error":{"type":"permission_error","message":"Nope"}}"#)),
@@ -177,6 +184,9 @@ final class UsageFetchingTests: XCTestCase {
     func testTokenRouteFailuresAreClassifiedByEvidence() {
         func classify(_ f: HTTPFailure) -> UsageError { ResponseClassifier.classify(f, route: .oauthToken, now: now) }
         XCTAssertEqual(classify(failure(401, body: invalidTokenBody)), .tokenRejected)
+        XCTAssertEqual(classify(failure(401, contentType: "text/html", body: "<html>Unauthorized</html>")), .accessDenied(401),
+                       "a 401 without the authentication_error marker is not a confirmed dead token")
+        XCTAssertEqual(classify(failure(401, body: "")), .accessDenied(401))
         XCTAssertEqual(classify(failure(403, body: scopeBody)), .tokenCannotReadUsage)
         XCTAssertEqual(classify(failure(403, body: "{}")), .accessDenied(403))
         XCTAssertEqual(classify(failure(403, contentType: "text/html", cf: "challenge")), .blockedByCloudflare)
@@ -196,7 +206,8 @@ final class UsageFetchingTests: XCTestCase {
         let all: [UsageError] = [.noCredentials, .tokenRejected, .tokenCannotReadUsage, .sessionKeyRejected,
                                  .blockedByCloudflare, .accessDenied(403), .rateLimited(retryAfter: 60), .redirected,
                                  .requestBlocked, .http(503), .network, .invalidResponse, .invalidOrganizationId,
-                                 .invalidCredentials, .keychain(-25293)]
+                                 .invalidCredentials, .keychain(-25293),
+                                 .fallbackFailed(token: .tokenCannotReadUsage, session: .blockedByCloudflare)]
         for error in all {
             XCTAssertFalse(error.message.isEmpty)
             XCTAssertLessThan(error.message.count, 80, error.message)
@@ -205,6 +216,16 @@ final class UsageFetchingTests: XCTestCase {
         XCTAssertTrue(UsageError.tokenCannotReadUsage.message.localizedCaseInsensitiveContains("session key"))
         XCTAssertTrue(UsageError.sessionKeyRejected.message.localizedCaseInsensitiveContains("session key"))
         XCTAssertFalse(UsageError.blockedByCloudflare.message.localizedCaseInsensitiveContains("expired"))
+        XCTAssertFalse(UsageError.blockedByCloudflare.message.contains("claude.ai"), "the OAuth route can see a bot check too")
+        for token in [UsageError.tokenRejected, .tokenCannotReadUsage] {
+            for session in [UsageError.sessionKeyRejected, .blockedByCloudflare, .accessDenied(403), .rateLimited(retryAfter: nil),
+                            .network, .http(503), .invalidResponse, .redirected, .requestBlocked, .invalidOrganizationId, .invalidCredentials] {
+                let message = UsageError.fallbackFailed(token: token, session: session).message
+                XCTAssertLessThan(message.count, 80, message)
+                XCTAssertTrue(message.localizedCaseInsensitiveContains("token"), message)
+                XCTAssertTrue(message.localizedCaseInsensitiveContains("session key"), message)
+            }
+        }
     }
 
     // MARK: Policies
@@ -221,9 +242,11 @@ final class UsageFetchingTests: XCTestCase {
 
     func testUnclearProblemsKeepTheLastNumbersButConfirmedCredentialProblemsClearThem() {
         let keep: [UsageError] = [.network, .http(503), .rateLimited(retryAfter: 60), .blockedByCloudflare,
-                                  .accessDenied(403), .invalidResponse, .redirected]
+                                  .accessDenied(403), .invalidResponse, .redirected, .keychain(-25308),
+                                  .fallbackFailed(token: .tokenRejected, session: .network)]
         let clear: [UsageError] = [.noCredentials, .sessionKeyRejected, .tokenRejected, .tokenCannotReadUsage,
-                                   .invalidCredentials, .invalidOrganizationId]
+                                   .invalidCredentials, .invalidOrganizationId,
+                                   .fallbackFailed(token: .tokenRejected, session: .sessionKeyRejected)]
         keep.forEach { XCTAssertTrue(RefreshPolicy.keepsLastReport(after: $0), "\($0)") }
         clear.forEach { XCTAssertFalse(RefreshPolicy.keepsLastReport(after: $0), "\($0)") }
     }
@@ -295,10 +318,11 @@ final class UsageFetchingTests: XCTestCase {
         }
     }
 
-    func testWhenBothRoutesFailTheSessionKeyErrorIsShown() async {
-        let recorder = Recorder([.http(failure(401, body: invalidTokenBody)), .http(failure(403, body: expiredSessionBody))])
+    func testWhenBothRoutesFailBothProblemsAreReported() async {
+        let recorder = Recorder([.http(failure(401, body: invalidTokenBody)), .http(failure(403, contentType: "text/html", cf: "challenge"))])
         let result = await recorder.fetcher(now: now).fetch(config: both)
-        XCTAssertEqual(result.failure, .sessionKeyRejected)
+        XCTAssertEqual(result.failure, .fallbackFailed(token: .tokenRejected, session: .blockedByCloudflare),
+                       "the confirmed dead token must not be hidden behind a temporary session-key problem")
     }
 
     func testSessionKeyAloneIsUsedDirectly() async {

@@ -17,6 +17,8 @@ struct ClaudeUsageWidgetApp: App {
         MenuBarExtra {
             UsageMenu(monitor: monitor)
         } label: {
+            // monitor.clock ticks every 30 seconds, so staleness and reset state here stay current between fetches.
+            let _ = monitor.clock
             MenuBarLabel(headline: monitor.headline,
                          isStale: monitor.isStale,
                          hasProblem: monitor.snapshot == nil && monitor.error != nil)

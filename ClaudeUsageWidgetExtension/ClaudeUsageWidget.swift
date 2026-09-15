@@ -17,8 +17,12 @@ struct ClaudeUsageEntry: TimelineEntry {
     let refreshSeconds: Int
     /// A problem to show: on its own when there are no numbers, or under numbers that are being kept as stale.
     let notice: String?
+    /// True only for confirmed credential or setup problems, which need the user to open the app.
+    var noticeNeedsAction: Bool = false
     /// When the next request may be sent, while a rate limit is in force.
     let nextAttempt: Date?
+    /// When to check again because the app promised to publish by then.
+    var reloadHint: Date? = nil
 
     var isStale: Bool {
         snapshot != nil && Freshness.isStale(fetchedAt: fetchedAt, refreshSeconds: refreshSeconds, now: date)
@@ -31,12 +35,13 @@ struct ClaudeUsageEntry: TimelineEntry {
     /// The same data, drawn at a later moment (a reset time, or when it goes stale).
     func at(_ later: Date) -> ClaudeUsageEntry {
         ClaudeUsageEntry(date: later, snapshot: snapshot, fetchedAt: fetchedAt, refreshSeconds: refreshSeconds,
-                         notice: notice, nextAttempt: nextAttempt)
+                         notice: notice, noticeNeedsAction: noticeNeedsAction, nextAttempt: nextAttempt, reloadHint: reloadHint)
     }
 
     static func problem(_ error: UsageError, refreshSeconds: Int, now: Date, nextAttempt: Date? = nil) -> ClaudeUsageEntry {
         ClaudeUsageEntry(date: now, snapshot: nil, fetchedAt: nil, refreshSeconds: refreshSeconds,
-                         notice: error.message, nextAttempt: nextAttempt)
+                         notice: error.message, noticeNeedsAction: !RefreshPolicy.keepsLastReport(after: error),
+                         nextAttempt: nextAttempt)
     }
 
     static var placeholder: ClaudeUsageEntry {
@@ -59,6 +64,7 @@ enum WidgetCooldown {
     private static let fromServerKey = "rateLimitFromServer"
     private static let reviewKey = "rateLimitNeedsReview"
     private static let countKey = "rateLimitCount"
+    private static let lastAtKey = "rateLimitLastAt"
 
     static func load() -> Cooldown? {
         let defaults = UserDefaults.standard
@@ -69,7 +75,9 @@ enum WidgetCooldown {
 
     static func record(retryAfter: TimeInterval?, refreshSeconds: Int, now: Date) -> Cooldown {
         let defaults = UserDefaults.standard
-        let count = defaults.integer(forKey: countKey) + 1
+        let count = RateLimitStreak.next(previous: defaults.integer(forKey: countKey),
+                                         lastRateLimitAt: defaults.object(forKey: lastAtKey) as? Date, now: now)
+        defaults.set(now, forKey: lastAtKey)
         let cooldown = BackoffPolicy.cooldown(afterRateLimit: count, retryAfter: retryAfter, refreshSeconds: refreshSeconds,
                                               now: now, jitter: Double.random(in: 0...1))
         defaults.set(count, forKey: countKey)
@@ -81,7 +89,7 @@ enum WidgetCooldown {
 
     static func clear() {
         let defaults = UserDefaults.standard
-        [untilKey, fromServerKey, reviewKey, countKey].forEach { defaults.removeObject(forKey: $0) }
+        [untilKey, fromServerKey, reviewKey, countKey, lastAtKey].forEach { defaults.removeObject(forKey: $0) }
     }
 }
 
@@ -109,22 +117,25 @@ struct ClaudeAPIFetcher {
             return .problem(usageError, refreshSeconds: refreshSeconds, now: now)
         }
 
-        if let fresh = RefreshSchedule.freshSnapshot(in: state, generation: config.generation, now: now) {
+        let cached: CachedReading?
+        switch WidgetPlan.decide(state: state, generation: config.generation, widgetCooldown: WidgetCooldown.load(), now: now) {
+        case .showFresh(let reading):
             logger.notice("Showing usage shared by the app")
-            return ClaudeUsageEntry(date: now, snapshot: fresh, fetchedAt: state?.fetchedAt, refreshSeconds: refreshSeconds,
-                                    notice: nil, nextAttempt: nil)
-        }
-        let cached = RefreshSchedule.cachedSnapshot(in: state, generation: config.generation)
-
-        let blocking = [state?.cooldown, WidgetCooldown.load()]
-            .compactMap { $0 }
-            .filter { $0.blocks(at: now, manual: false) }
-            .max { $0.until < $1.until }
-        if let blocking {
-            logger.notice("Waiting out a rate limit before fetching")
-            return ClaudeUsageEntry(date: now, snapshot: cached?.snapshot, fetchedAt: cached?.fetchedAt,
+            return ClaudeUsageEntry(date: now, snapshot: reading.snapshot, fetchedAt: reading.fetchedAt,
+                                    refreshSeconds: refreshSeconds, notice: nil, nextAttempt: nil)
+        case .waitForApp(let reading, let notice, let until):
+            logger.notice("The app is running; waiting for its next reading")
+            return ClaudeUsageEntry(date: now, snapshot: reading?.snapshot, fetchedAt: reading?.fetchedAt,
                                     refreshSeconds: refreshSeconds,
-                                    notice: UsageError.rateLimited(retryAfter: nil).message, nextAttempt: blocking.until)
+                                    notice: notice ?? (reading == nil ? "Waiting for the app's first reading." : nil),
+                                    nextAttempt: nil, reloadHint: until)
+        case .waitForCooldown(let reading, let until):
+            logger.notice("Waiting out a rate limit before fetching")
+            return ClaudeUsageEntry(date: now, snapshot: reading?.snapshot, fetchedAt: reading?.fetchedAt,
+                                    refreshSeconds: refreshSeconds,
+                                    notice: UsageError.rateLimited(retryAfter: nil).message, nextAttempt: until)
+        case .fetch(let reading):
+            cached = reading
         }
 
         var fetcher = UsageFetcher.live
@@ -138,8 +149,8 @@ struct ClaudeAPIFetcher {
         case .failure(let error):
             logger.error("Usage fetch failed: \(error.message, privacy: .public)")
             var nextAttempt: Date?
-            if case .rateLimited(let retryAfter) = error {
-                nextAttempt = WidgetCooldown.record(retryAfter: retryAfter, refreshSeconds: refreshSeconds, now: now).until
+            if error.isRateLimited {
+                nextAttempt = WidgetCooldown.record(retryAfter: error.retryAfter, refreshSeconds: refreshSeconds, now: now).until
             }
             if RefreshPolicy.keepsLastReport(after: error), let cached {
                 return ClaudeUsageEntry(date: now, snapshot: cached.snapshot, fetchedAt: cached.fetchedAt,
@@ -172,9 +183,14 @@ struct ClaudeUsageProvider: TimelineProvider {
             let now = Date()
             let entry = await ClaudeAPIFetcher.currentEntry(now: now)
             let cooldown = entry.nextAttempt.map { Cooldown(until: $0, fromServer: false, needsReview: false) }
-            // While the app runs it also pushes a redraw after every refresh, so this is the fallback schedule.
-            let next = RefreshSchedule.nextRefresh(after: now, refreshSeconds: entry.refreshSeconds,
+            // While the app runs it pushes a redraw after every refresh, so this is only the fallback schedule.
+            let next: Date
+            if let hint = entry.reloadHint {
+                next = max(hint, now.addingTimeInterval(30))
+            } else {
+                next = RefreshSchedule.nextRefresh(after: now, refreshSeconds: entry.refreshSeconds,
                                                    snapshot: entry.snapshot, cooldown: cooldown)
+            }
             // Extra entries redraw the same data when a limit's reset time passes and when the reading goes stale,
             // even if WidgetKit delays the next reload.
             var dates = ResetBoundary.entryDates(for: entry.snapshot, now: now, before: .distantFuture)
@@ -223,6 +239,7 @@ struct StatusLine: View {
 struct ProblemView: View {
     let message: String
     let style: Style
+    var needsAction: Bool = false
 
     enum Style { case small, medium, large }
 
@@ -258,9 +275,11 @@ struct ProblemView: View {
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
-                Text("Open the Claude Usage Widget app to fix this.")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.tertiary)
+                if needsAction {
+                    Text("Open the Claude Usage Widget app to fix this.")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                }
             }
             .padding()
         }
@@ -274,25 +293,34 @@ struct ClaudeUsageSmallView: View {
 
     var body: some View {
         if entry.snapshot == nil {
-            ProblemView(message: entry.notice ?? "No usage yet.", style: .small)
+            ProblemView(message: entry.notice ?? "No usage yet.", style: .small, needsAction: entry.noticeNeedsAction)
         } else {
             let fiveHour = entry.display(.fiveHour)
             let weekly = entry.display(.weekly)
-            VStack(alignment: .leading, spacing: 8) {
+            let fable = entry.display(.fableWeekly)
+            // The big number is the limit closest to full, labeled with which limit it is (for example "F 94%").
+            let headline = Headline.make(for: entry.snapshot, metric: .auto, now: entry.date)
+            let headlineDisplay = headline.limit.map { entry.display($0) }
+            VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 4) {
                     Text("Claude")
                         .font(.system(size: 13, weight: .bold))
                     Spacer()
-                    Text(fiveHour.percentText)
-                        .font(.system(size: 20, weight: .heavy, design: .rounded))
-                        .foregroundStyle(fiveHour.color)
+                    Text(headline.text)
+                        .font(.system(size: 18, weight: .heavy, design: .rounded))
+                        .foregroundStyle(headlineDisplay?.color ?? Color.secondary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
                 }
 
-                SmallBar(title: "5h Session", display: fiveHour, height: 6)
+                SmallBar(title: "5h Session", display: fiveHour, height: 5)
                 SmallBar(title: "Weekly", display: weekly, height: 5)
+                if fable.percent != nil {
+                    SmallBar(title: "Fable weekly", display: fable, height: 5)
+                }
 
                 Spacer(minLength: 0)
-                StatusLine(entry: entry, normalText: fiveHour.resetText)
+                StatusLine(entry: entry, normalText: fiveHour.resetText.map { "5h: " + $0 }, size: 9)
             }
             .opacity(entry.isStale ? 0.75 : 1)
             .padding(12)
@@ -324,7 +352,7 @@ struct ClaudeUsageMediumView: View {
 
     var body: some View {
         if entry.snapshot == nil {
-            ProblemView(message: entry.notice ?? "No usage yet.", style: .medium)
+            ProblemView(message: entry.notice ?? "No usage yet.", style: .medium, needsAction: entry.noticeNeedsAction)
         } else {
             let fiveHour = entry.display(.fiveHour)
             let weekly = entry.display(.weekly)
@@ -413,7 +441,7 @@ struct ClaudeUsageLargeView: View {
 
     var body: some View {
         if entry.snapshot == nil {
-            ProblemView(message: entry.notice ?? "No usage yet.", style: .large)
+            ProblemView(message: entry.notice ?? "No usage yet.", style: .large, needsAction: entry.noticeNeedsAction)
         } else {
             let fiveHour = entry.display(.fiveHour)
             let weekly = entry.display(.weekly)
@@ -460,7 +488,9 @@ struct ClaudeUsageLargeView: View {
                         Divider().frame(height: 30).padding(.horizontal, 8)
                         StatBox(label: "Weekly", value: weekly.percentText, color: weekly.color)
                         Divider().frame(height: 30).padding(.horizontal, 8)
-                        StatBox(label: "Status", value: fiveHour.percent.map(statusText) ?? "—", color: fiveHour.color)
+                        let tightest = Headline.make(for: entry.snapshot, metric: .auto, now: entry.date).limit.map { entry.display($0) }
+                        StatBox(label: tightest.map { "Status · \($0.kind.shortLabel)" } ?? "Status",
+                                value: tightest?.percent.map(statusText) ?? "—", color: tightest?.color ?? Color.secondary)
                     }
                 }
             }

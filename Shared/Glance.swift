@@ -129,27 +129,36 @@ struct Headline: Equatable, Sendable {
     let text: String
     /// True when a limit the menu bar isn't showing is at or above 90%.
     let hiddenLimitWarning: Bool
+    /// True when the shown limit's reset time has passed but no new reading has confirmed it.
+    let awaitingReset: Bool
 
     static let hiddenWarningThreshold = 90.0
 
-    /// "Closest to full" picks the highest reported percentage; ties go to the earlier limit in display order.
-    /// That is not a forecast of which limit you'll hit first.
-    static func make(for snapshot: UsageSnapshot?, metric: MenuBarMetric) -> Headline {
-        guard let snapshot else { return Headline(limit: nil, text: "—", hiddenLimitWarning: false) }
+    /// "Closest to full" picks the highest reported percentage among windows that haven't reset yet; ties go to
+    /// the earlier limit in display order. That is not a forecast of which limit you'll hit first.
+    static func make(for snapshot: UsageSnapshot?, metric: MenuBarMetric, now: Date = Date()) -> Headline {
+        let empty = Headline(limit: nil, text: "—", hiddenLimitWarning: false, awaitingReset: false)
+        guard let snapshot else { return empty }
         let reported = LimitKind.allCases.compactMap { kind in snapshot.percent(for: kind).map { (kind, $0) } }
+        let current = reported.filter { !ResetBoundary.isAwaitingReset(snapshot.resetsAt(for: $0.0), now: now) }
         let shown: LimitKind?
         if let fixed = metric.limit {
             shown = fixed
         } else {
-            shown = reported.reduce(nil as (LimitKind, Double)?) { best, next in
-                guard let best else { return next }
-                return next.1 > best.1 ? next : best
-            }?.0
+            shown = highest(current.isEmpty ? reported : current)
         }
-        guard let shown else { return Headline(limit: nil, text: "—", hiddenLimitWarning: false) }
+        guard let shown else { return empty }
         let text = "\(shown.shortLabel) \(UsageFormatting.percentText(snapshot.percent(for: shown)))"
-        let warning = reported.contains { $0.0 != shown && $0.1 >= hiddenWarningThreshold }
-        return Headline(limit: shown, text: text, hiddenLimitWarning: warning)
+        let warning = current.contains { $0.0 != shown && $0.1 >= hiddenWarningThreshold }
+        return Headline(limit: shown, text: text, hiddenLimitWarning: warning,
+                        awaitingReset: ResetBoundary.isAwaitingReset(snapshot.resetsAt(for: shown), now: now))
+    }
+
+    private static func highest(_ readings: [(LimitKind, Double)]) -> LimitKind? {
+        readings.reduce(nil as (LimitKind, Double)?) { best, next in
+            guard let best else { return next }
+            return next.1 > best.1 ? next : best
+        }?.0
     }
 }
 

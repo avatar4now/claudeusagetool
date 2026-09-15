@@ -35,8 +35,8 @@ macOS 桌面小组件（WidgetKit），实时监控你的 Claude AI 用量限制
 1. git clone https://github.com/dependentsign/ClaudeUsageWidget.git ~/Documents/ClaudeUsageWidget
 2. 打开 .xcodeproj，在 Xcode 里设置你的 Development Team，或者直接修改 project.pbxproj 里的 DEVELOPMENT_TEAM
 3. 构建：xcodebuild -project ~/Documents/ClaudeUsageWidget/ClaudeUsageWidget.xcodeproj -scheme ClaudeUsageWidget -destination 'platform=macOS' build
-4. 安装：用 ditto 把 DerivedData 里构建好的 .app 复制到 /Applications/ClaudeUsageWidget.app，然后 codesign --force --deep --sign - /Applications/ClaudeUsageWidget.app
-5. 创建配置文件 ~/.claude/claude-usage-widget.json，填入我的 Claude session key（从 claude.ai 的 cookies 获取）和 org ID（用 curl https://claude.ai/api/organizations 加 session key cookie 获取）
+4. 安装：运行 scripts/update-app.sh，它会运行测试、构建、检查签名，并把应用安装到 ~/Applications
+5. 打开应用，在设置窗口中填入我的 claude.ai session key 和 organization ID（它们保存在 macOS 登录钥匙串中）
 6. 打开应用：open /Applications/ClaudeUsageWidget.app
 7. 告诉我右键桌面 → 编辑小组件 → 搜索 "Claude" 添加
 ```
@@ -58,38 +58,27 @@ open ClaudeUsageWidget.xcodeproj
 - 按需修改 **Bundle Identifier**
 - 构建运行（⌘R）
 
-### 2. 配置凭证
+### 2. 安装并配置凭证
 
-创建配置文件 `~/.claude/claude-usage-widget.json`：
+运行更新脚本。它会运行测试、构建 Release 版本、检查签名，并安装到 `~/Applications`：
 
-**方式 A：OAuth Token（推荐）**
-```json
-{
-  "oauthToken": "你的-oauth-bearer-token"
-}
-```
-
-**方式 B：Session Key**
-```json
-{
-  "sessionKey": "sk-ant-sid01-...",
-  "organizationId": "你的-org-uuid"
-}
-```
-
-<details>
-<summary>如何获取 session key</summary>
-
-1. 打开 [claude.ai](https://claude.ai) 并登录
-2. 开发者工具（F12）→ Application → Cookies → 复制 `sessionKey`
-3. 获取组织 ID：
 ```bash
-curl -s https://claude.ai/api/organizations \
-  -H "Cookie: sessionKey=你的KEY" | python3 -m json.tool
+scripts/update-app.sh
 ```
-复制 `uuid` 字段。
 
-</details>
+打开 **Claude Usage Widget**。首次启动时会打开设置窗口。在这里填写凭证；凭证保存在 macOS 登录钥匙串中，只有本应用和它的小组件可以读取。
+
+**Session key（推荐）**
+
+1. 在浏览器中打开 [claude.ai](https://claude.ai) 并登录。
+2. 打开开发者工具 → Application → Cookies → 复制 `sessionKey`。
+3. 在同一浏览器中打开 [claude.ai/api/organizations](https://claude.ai/api/organizations)，复制 `uuid`。
+
+**OAuth token（可选）**：`claude setup-token` 生成的 token 无法读取用量，除非你有可以读取用量的 token，否则请留空。
+
+点击 **Save Configuration**。应用会立即测试连接，并告诉你哪些正常、哪些需要修复。
+
+> 从旧版本升级？旧版本读取 `~/.claude/claude-usage-widget.json`。当前版本不再读取该文件。请在应用中填写凭证，然后删除旧文件：`rm ~/.claude/claude-usage-widget.json`
 
 ### 3. 添加小组件
 

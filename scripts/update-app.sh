@@ -19,7 +19,17 @@ widget_id=dev.huan.ClaudeUsageWidget.WidgetExtension
 lsregister=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 expected_team=$(awk -F' = ' '/DEVELOPMENT_TEAM = /{gsub(/[;" ]/, "", $2); print $2; exit}' "$project/project.pbxproj")
 
+tmp_root="${TMPDIR:-/tmp}"
+
 fail() { echo "✗ $*" >&2; exit 1; }
+
+staging="$install_dir/.ClaudeUsageWidget-installing.app"
+previous="$install_dir/.ClaudeUsageWidget-previous.app"
+# If an earlier run was interrupted mid-swap, put the previous app back before doing anything else.
+if [[ ! -d "$installed" && -d "$previous" ]]; then
+  echo "==> Restoring the app left over from an interrupted install"
+  mv "$previous" "$installed"
+fi
 
 if [[ "${1:-}" != "--skip-tests" ]]; then
   echo "==> Running tests"
@@ -35,41 +45,52 @@ fi
 echo "==> Building (Release)"
 # Build outside ~/Documents: iCloud file attributes there can break code signing.
 build_dir=$(mktemp -d -t claude-usage-build)
-trap 'rm -rf "$build_dir"' EXIT
+built="$build_dir/DerivedData/Build/Products/Release/$app_name"
+appex="$built/Contents/PlugIns/ClaudeUsageWidgetExtension.appex"
+# xcodebuild registers what it builds with LaunchServices. Unregister the temporary copy before deleting it,
+# including when the script stops early, so macOS never keeps a widget pointing at a deleted folder.
+cleanup() {
+  if [[ -d "$built" ]]; then
+    pluginkit -r "$appex" 2>/dev/null || true
+    "$lsregister" -u "$built" 2>/dev/null || true
+  fi
+  rm -rf "$build_dir"
+}
+trap cleanup EXIT
 build_log="$build_dir/build.log"
 if ! xcodebuild -project "$project" -scheme "$scheme" -configuration Release -destination 'platform=macOS' \
      -derivedDataPath "$build_dir/DerivedData" build >"$build_log" 2>&1; then
   grep -E 'error:' "$build_log" | head -20 >&2 || true
-  cp "$build_log" "$TMPDIR/claude-usage-build-failed.log"
-  fail "Build failed, so nothing was installed. Full log: $TMPDIR/claude-usage-build-failed.log"
+  saved_log="$tmp_root/claude-usage-build-failed.log"
+  cp "$build_log" "$saved_log"
+  fail "Build failed, so nothing was installed. Full log: $saved_log"
 fi
-built="$build_dir/DerivedData/Build/Products/Release/$app_name"
-appex="$built/Contents/PlugIns/ClaudeUsageWidgetExtension.appex"
 [[ -d "$built" && -d "$appex" ]] || fail "Build finished, but the app or its widget is missing."
 
 echo "==> Checking signatures"
 codesign --verify --deep --strict "$built" || fail "The app's signature didn't verify."
 codesign --verify --strict "$appex" || fail "The widget's signature didn't verify."
-team_of() { codesign -dv "$1" 2>&1 | awk -F= '/^TeamIdentifier=/{print $2}'; }
+# Prints the signing team, or nothing for an unsigned or ad-hoc signed copy. Never fails the script by itself.
+team_of() {
+  local team
+  team=$(codesign -dv "$1" 2>&1 | awk -F= '/^TeamIdentifier=/{print $2}' || true)
+  [[ "$team" == "not set" ]] && team=""
+  echo "$team"
+}
 built_team=$(team_of "$built")
 [[ "$built_team" == "$expected_team" ]] || fail "Built with team '$built_team', expected '$expected_team'. Keychain access would break."
 [[ "$(team_of "$appex")" == "$expected_team" ]] || fail "The widget was signed by a different team than the app."
 if [[ -d "$installed" ]]; then
   installed_team=$(team_of "$installed")
-  [[ -z "$installed_team" || "$installed_team" == "$built_team" ]] ||
+  if [[ -z "$installed_team" ]]; then
+    echo "    The installed copy has no signing team; replacing it with the team-signed build."
+  elif [[ "$installed_team" != "$built_team" ]]; then
     fail "The installed copy is signed by team '$installed_team'. Installing over it could lock the app out of its keychain items."
+  fi
 fi
 version=$(plutil -extract CFBundleShortVersionString raw "$built/Contents/Info.plist")
 build_number=$(plutil -extract CFBundleVersion raw "$built/Contents/Info.plist")
 echo "    Team $built_team, version $version ($build_number)"
-
-echo "==> Stopping the running app and widget"
-pkill -x ClaudeUsageWidget 2>/dev/null || true
-pkill -x ClaudeUsageWidgetExtension 2>/dev/null || true
-for _ in {1..40}; do
-  pgrep -x ClaudeUsageWidget >/dev/null || break
-  sleep 0.25
-done
 
 mkdir -p "$install_dir" "$backup_dir"
 if [[ -d "$installed" ]]; then
@@ -82,14 +103,24 @@ if [[ -d "$installed" ]]; then
 fi
 
 echo "==> Installing to $installed"
-staging="$install_dir/.ClaudeUsageWidget-installing.app"
-previous="$install_dir/.ClaudeUsageWidget-previous.app"
 rm -rf "$staging" "$previous"
 ditto "$built" "$staging"
 codesign --verify --deep --strict "$staging" || { rm -rf "$staging"; fail "The copied app didn't verify; the installed copy was left alone."; }
+
+echo "==> Stopping the running app and widget"
+was_running=false
+pgrep -x ClaudeUsageWidget >/dev/null && was_running=true
+pkill -x ClaudeUsageWidget 2>/dev/null || true
+pkill -x ClaudeUsageWidgetExtension 2>/dev/null || true
+for _ in {1..40}; do
+  pgrep -x ClaudeUsageWidget >/dev/null || break
+  sleep 0.25
+done
+
 if [[ -d "$installed" ]]; then mv "$installed" "$previous"; fi
 if ! mv "$staging" "$installed"; then
   [[ -d "$previous" ]] && mv "$previous" "$installed"
+  [[ "$was_running" == true ]] && open "$installed" || true
   fail "Couldn't move the new app into place; the previous copy was restored."
 fi
 rm -rf "$previous"
@@ -107,7 +138,8 @@ removed_other_copy=false
 while IFS= read -r path; do
   [[ -z "$path" || "$path" == "$installed" || "$path" == "$installed"/* ]] && continue
   echo "    Unregistering ${path/#$HOME/~}"
-  removed_other_copy=true
+  # This run's own temporary build was never used for the desktop widget, so it doesn't need a widget host restart.
+  [[ "$path" == "$build_dir"/* || "$path" == "/private$build_dir"/* ]] || removed_other_copy=true
   case "$path" in
     *.appex) pluginkit -r "$path" 2>/dev/null || true ;;
     *.app)

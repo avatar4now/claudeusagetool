@@ -26,6 +26,8 @@ enum UsageError: Error, Equatable, Sendable {
     case network
     case invalidResponse
     case keychain(OSStatus)
+    /// The token is confirmed unusable and the session-key fallback failed too. Both problems are kept.
+    indirect case fallbackFailed(token: UsageError, session: UsageError)
 
     var message: String {
         switch self {
@@ -35,7 +37,7 @@ enum UsageError: Error, Equatable, Sendable {
         case .tokenRejected: return "OAuth token rejected (401). Paste a new one in the app."
         case .tokenCannotReadUsage: return "This OAuth token can't read usage. Use a session key instead."
         case .sessionKeyRejected: return "Session key expired or signed out. Paste a new session key."
-        case .blockedByCloudflare: return "claude.ai showed a bot check. Retrying later; your key may be fine."
+        case .blockedByCloudflare: return "The usage service showed a bot check. Retrying later; your key may be fine."
         case .accessDenied(let code): return "Access denied (\(code)) for an unclear reason. Retrying later."
         case .rateLimited: return "Rate limited by the usage service. Waiting before trying again."
         case .redirected: return "The usage service redirected the request, so it was stopped."
@@ -44,6 +46,31 @@ enum UsageError: Error, Equatable, Sendable {
         case .network: return "Network unavailable. Retrying on the next refresh."
         case .invalidResponse: return "Unexpected response from the usage service."
         case .keychain(let status): return "Keychain error \(status). Open the app and save again."
+        case .fallbackFailed(let token, let session): return "\(token.tokenPart); \(session.sessionPart)."
+        }
+    }
+
+    private var tokenPart: String {
+        switch self {
+        case .tokenCannotReadUsage: return "OAuth token can't read usage"
+        default: return "OAuth token rejected"
+        }
+    }
+
+    private var sessionPart: String {
+        switch self {
+        case .sessionKeyRejected: return "session key expired"
+        case .blockedByCloudflare: return "session key hit a bot check"
+        case .accessDenied(let code): return "session key denied (\(code))"
+        case .rateLimited: return "session key rate limited"
+        case .network: return "session key couldn't connect"
+        case .http(let code): return "session key got HTTP \(code)"
+        case .invalidResponse: return "session key got an unexpected reply"
+        case .redirected: return "session key request was redirected"
+        case .requestBlocked: return "session key request was blocked"
+        case .invalidOrganizationId: return "session key needs a valid org ID"
+        case .invalidCredentials: return "session key is malformed"
+        default: return "session key failed"
         }
     }
 }
@@ -82,7 +109,7 @@ enum ResponseClassifier {
 
         switch route {
         case .oauthToken:
-            if status == 401 { return .tokenRejected }
+            if status == 401, error?.type == "authentication_error" { return .tokenRejected }
             if let message = error?.message, message.localizedCaseInsensitiveContains("scope requirement") {
                 return .tokenCannotReadUsage
             }
@@ -93,11 +120,13 @@ enum ResponseClassifier {
         return .accessDenied(status)
     }
 
-    /// Cloudflare marks challenges with a cf-mitigated header, and its challenge pages load /cdn-cgi/challenge-platform.
+    /// Cloudflare marks challenges with a cf-mitigated header. Its challenge pages also carry recognizable markers:
+    /// the "Just a moment..." title near the top, the challenge options object, and the challenge-platform script.
     private static func isCloudflareChallenge(_ failure: HTTPFailure) -> Bool {
         if failure.cfMitigated?.localizedCaseInsensitiveContains("challenge") == true { return true }
         guard failure.contentType?.localizedCaseInsensitiveContains("text/html") == true else { return false }
-        return String(decoding: failure.bodyPrefix, as: UTF8.self).contains("/cdn-cgi/challenge-platform")
+        let page = String(decoding: failure.bodyPrefix, as: UTF8.self)
+        return ["<title>Just a moment...</title>", "window._cf_chl_opt", "/cdn-cgi/challenge-platform"].contains { page.contains($0) }
     }
 
     private struct ErrorFields {
@@ -134,11 +163,14 @@ enum FallbackPolicy {
 enum RefreshPolicy {
     static func keepsLastReport(after error: UsageError) -> Bool {
         switch error {
-        case .network, .http, .rateLimited, .blockedByCloudflare, .accessDenied, .invalidResponse, .redirected, .requestBlocked:
+        case .network, .http, .rateLimited, .blockedByCloudflare, .accessDenied, .invalidResponse, .redirected, .requestBlocked,
+             .keychain:
             return true
         case .noCredentials, .invalidOrganizationId, .invalidCredentials, .tokenRejected, .tokenCannotReadUsage,
-             .sessionKeyRejected, .keychain:
+             .sessionKeyRejected:
             return false
+        case .fallbackFailed(_, let session):
+            return keepsLastReport(after: session)
         }
     }
 }
@@ -316,17 +348,20 @@ struct UsageFetcher {
         }
 
         // Past this point the token is absent or confirmed unusable, so the session key's result is the one to report.
+        func failed(_ sessionError: UsageError) -> Result<UsageReport, UsageError> {
+            .failure(tokenFailure.map { .fallbackFailed(token: $0, session: sessionError) } ?? sessionError)
+        }
         guard let sessionKey = config.sessionKey else { return .failure(.noCredentials) }
-        guard WidgetConfig.isSafeSessionKey(sessionKey) else { return .failure(.invalidCredentials) }
+        guard WidgetConfig.isSafeSessionKey(sessionKey) else { return failed(.invalidCredentials) }
         guard let organizationId = config.validatedOrganizationId,
               let request = ClaudeEndpoints.sessionKeyRequest(sessionKey: sessionKey, organizationId: organizationId)
-        else { return .failure(.invalidOrganizationId) }
+        else { return failed(.invalidOrganizationId) }
 
         switch await attempt(request, route: .sessionKey) {
         case .success(let snapshot):
             return .success(UsageReport(snapshot: snapshot, route: .sessionKey, tokenFailure: tokenFailure))
         case .failure(let error):
-            return .failure(error)
+            return failed(error)
         }
     }
 
@@ -389,5 +424,25 @@ final class RedirectRefusingDelegate: NSObject, URLSessionTaskDelegate, @uncheck
                                 newRequest request: URLRequest,
                                 completionHandler: @escaping (URLRequest?) -> Void) {
         completionHandler(nil)
+    }
+}
+
+extension UsageError {
+    /// True when this error, or the session-key half of a failed fallback, is a 429.
+    var isRateLimited: Bool {
+        switch self {
+        case .rateLimited: return true
+        case .fallbackFailed(_, let session): return session.isRateLimited
+        default: return false
+        }
+    }
+
+    /// The server's requested wait inside a rate-limit error, if it sent one.
+    var retryAfter: TimeInterval? {
+        switch self {
+        case .rateLimited(let retryAfter): return retryAfter
+        case .fallbackFailed(_, let session): return session.retryAfter
+        default: return nil
+        }
     }
 }

@@ -9,10 +9,12 @@ struct MenuBarLabel: View {
     /// True when there are no numbers to show because something is wrong.
     let hasProblem: Bool
 
+    /// The main symbol says whether the number is current. A second symbol flags a nearly full limit that isn't shown,
+    /// so a stale reading and a hidden-limit warning can both be visible at once.
     var symbol: String {
         if hasProblem { return "exclamationmark.triangle" }
-        if headline.hiddenLimitWarning { return "exclamationmark.triangle.fill" }
         if isStale { return "clock.badge.exclamationmark" }
+        if headline.awaitingReset { return "arrow.clockwise" }
         return "gauge.with.dots.needle.33percent"
     }
 
@@ -22,6 +24,7 @@ struct MenuBarLabel: View {
             parts.append("\(limit.title), \(headline.text.split(separator: " ").last.map(String.init) ?? "")")
         }
         if headline.hiddenLimitWarning { parts.append("another limit is above 90 percent") }
+        if headline.awaitingReset { parts.append("waiting to confirm the reset") }
         if isStale { parts.append("data is out of date") }
         if hasProblem { parts.append("needs attention") }
         return parts.joined(separator: ", ")
@@ -30,6 +33,9 @@ struct MenuBarLabel: View {
     var body: some View {
         HStack(spacing: 4) {
             Image(systemName: symbol)
+            if headline.hiddenLimitWarning && !hasProblem {
+                Image(systemName: "exclamationmark.triangle.fill")
+            }
             Text(headline.text)
                 .monospacedDigit()
         }
@@ -88,7 +94,9 @@ struct UsageMenuContent: View {
                     .font(.caption)
                     .foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
-            } else if let error {
+            }
+            // A newer problem (for example after a manual retry during a long wait) is shown alongside the cooldown.
+            if let error, !(activeCooldown != nil && error.isRateLimited) {
                 Label(error.message, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
                     .foregroundStyle(.orange)

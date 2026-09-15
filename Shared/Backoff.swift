@@ -10,12 +10,20 @@ enum RetryAfter {
         return formatter
     }()
 
+    /// The longest wait the app will record. Anything larger is treated as this, so a nonsense header can't
+    /// overflow a timer; a wait this long is flagged for review, which lets a manual refresh try earlier.
+    static let maximum: TimeInterval = 7 * 86_400
+
     /// Seconds to wait from `now`, or nil when the header is missing or unreadable. A date in the past means 0.
     static func parse(_ value: String?, now: Date) -> TimeInterval? {
         guard let text = value?.trimmingCharacters(in: .whitespaces), !text.isEmpty else { return nil }
-        if text.allSatisfy(\.isNumber), let seconds = TimeInterval(text) { return seconds }
+        if text.allSatisfy(\.isNumber), let seconds = TimeInterval(text) { return capped(seconds) }
         guard let date = httpDate.date(from: text) else { return nil }
-        return max(0, date.timeIntervalSince(now))
+        return capped(max(0, date.timeIntervalSince(now)))
+    }
+
+    static func capped(_ seconds: TimeInterval) -> TimeInterval {
+        seconds.isFinite ? min(seconds, maximum) : maximum
     }
 }
 
@@ -47,12 +55,24 @@ enum BackoffPolicy {
     static func cooldown(afterRateLimit count: Int, retryAfter: TimeInterval?, refreshSeconds: Int,
                          now: Date, jitter: Double) -> Cooldown {
         if let retryAfter, retryAfter >= 0 {
-            return Cooldown(until: now.addingTimeInterval(retryAfter), fromServer: true,
-                            needsReview: retryAfter > implausibleServerDelay)
+            let wait = RetryAfter.capped(retryAfter)
+            return Cooldown(until: now.addingTimeInterval(wait), fromServer: true,
+                            needsReview: wait > implausibleServerDelay)
         }
         let doublings = Double(min(max(count, 1), 16))
         let base = TimeInterval(refreshSeconds) * pow(2, doublings)
         let delay = min(base * (1 + 0.1 * min(max(jitter, 0), 1)), maximumLocalDelay)
         return Cooldown(until: now.addingTimeInterval(delay), fromServer: false, needsReview: false)
+    }
+}
+
+/// Counts rate limits in a row. A 429 more than half an hour after the previous one starts a new streak,
+/// so one isolated rate limit never inherits a long wait from days ago.
+enum RateLimitStreak {
+    static let window: TimeInterval = 30 * 60
+
+    static func next(previous: Int, lastRateLimitAt: Date?, now: Date) -> Int {
+        guard let lastRateLimitAt, now.timeIntervalSince(lastRateLimitAt) <= window else { return 1 }
+        return max(previous, 0) + 1
     }
 }

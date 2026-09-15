@@ -56,7 +56,9 @@ final class RefreshScheduleTests: XCTestCase {
                                      snapshot: UsageSnapshot(fiveHourPercent: 42.5, fableWeeklyPercent: 3, fableWeeklyResetsAt: now),
                                      fetchedAt: now,
                                      cooldown: Cooldown(until: now.addingTimeInterval(90), fromServer: true, needsReview: false),
-                                     credentialGeneration: "gen")
+                                     credentialGeneration: "gen",
+                                     appHeartbeatUntil: now.addingTimeInterval(210),
+                                     appErrorMessage: UsageError.network.message)
         XCTAssertEqual(try SharedUsageState.decode(try state.encoded()), state)
         XCTAssertEqual(state.schemaVersion, SharedUsageState.currentSchemaVersion)
     }

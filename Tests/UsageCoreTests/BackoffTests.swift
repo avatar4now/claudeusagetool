@@ -16,6 +16,22 @@ final class BackoffTests: XCTestCase {
         XCTAssertNil(RetryAfter.parse(nil, now: now))
     }
 
+    func testAbsurdRetryAfterValuesAreCappedSoTheyCannotCrashTheScheduler() {
+        XCTAssertEqual(RetryAfter.parse("99999999999999999999", now: now), RetryAfter.maximum)
+        XCTAssertEqual(RetryAfter.parse(String(repeating: "9", count: 400), now: now), RetryAfter.maximum)
+        XCTAssertEqual(RetryAfter.parse("Fri, 31 Dec 9999 23:59:59 GMT", now: now), RetryAfter.maximum)
+        let cooldown = BackoffPolicy.cooldown(afterRateLimit: 1, retryAfter: .infinity, refreshSeconds: 120, now: now, jitter: 0)
+        XCTAssertEqual(cooldown.until, now.addingTimeInterval(RetryAfter.maximum))
+        XCTAssertTrue(cooldown.needsReview)
+    }
+
+    func testRateLimitStreakDecaysAfterHalfAnHourWithoutA429() {
+        XCTAssertEqual(RateLimitStreak.next(previous: 0, lastRateLimitAt: nil, now: now), 1)
+        XCTAssertEqual(RateLimitStreak.next(previous: 3, lastRateLimitAt: now.addingTimeInterval(-600), now: now), 4)
+        XCTAssertEqual(RateLimitStreak.next(previous: 5, lastRateLimitAt: now.addingTimeInterval(-7 * 86_400), now: now), 1,
+                       "a lone 429 a week later is not the sixth in a row")
+    }
+
     func testServerDeadlineIsHonoredExactlyWithoutJitter() {
         let cooldown = BackoffPolicy.cooldown(afterRateLimit: 1, retryAfter: 90, refreshSeconds: 120, now: now, jitter: 1)
         XCTAssertEqual(cooldown.until, now.addingTimeInterval(90))

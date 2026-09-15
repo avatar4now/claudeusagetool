@@ -35,8 +35,8 @@ Steps:
 1. git clone https://github.com/dependentsign/ClaudeUsageWidget.git ~/Documents/ClaudeUsageWidget
 2. Open the .xcodeproj and set your Development Team in Xcode, or update DEVELOPMENT_TEAM in project.pbxproj
 3. Build: xcodebuild -project ~/Documents/ClaudeUsageWidget/ClaudeUsageWidget.xcodeproj -scheme ClaudeUsageWidget -destination 'platform=macOS' build
-4. Install: ditto the built .app from DerivedData to /Applications/ClaudeUsageWidget.app, then codesign --force --deep --sign - /Applications/ClaudeUsageWidget.app
-5. Create config at ~/.claude/claude-usage-widget.json with my Claude session key (get it from claude.ai cookies) and org ID (curl https://claude.ai/api/organizations with the session key cookie)
+4. Install: run scripts/update-app.sh, which runs the tests, builds, checks signatures, and installs the app to ~/Applications
+5. Open the app and enter my claude.ai session key and organization ID in its Settings window (they are stored in the macOS login keychain)
 6. Open the app: open /Applications/ClaudeUsageWidget.app
 7. Tell me to right-click desktop → Edit Widgets → search "Claude" to add it
 ```
@@ -58,38 +58,27 @@ In Xcode:
 - Update **Bundle Identifier** if needed
 - Build & Run (⌘R)
 
-### 2. Configure Credentials
+### 2. Install and Configure Credentials
 
-Create `~/.claude/claude-usage-widget.json`:
+Run the update script. It runs the tests, builds a Release copy, checks the signatures, and installs it to `~/Applications`:
 
-**Option A: OAuth Token (recommended)**
-```json
-{
-  "oauthToken": "your-oauth-bearer-token"
-}
-```
-
-**Option B: Session Key**
-```json
-{
-  "sessionKey": "sk-ant-sid01-...",
-  "organizationId": "your-org-uuid"
-}
-```
-
-<details>
-<summary>How to get session key</summary>
-
-1. Open [claude.ai](https://claude.ai) and log in
-2. DevTools (F12) → Application → Cookies → copy `sessionKey`
-3. Get org ID:
 ```bash
-curl -s https://claude.ai/api/organizations \
-  -H "Cookie: sessionKey=YOUR_KEY" | python3 -m json.tool
+scripts/update-app.sh
 ```
-Copy the `uuid` field.
 
-</details>
+Open **Claude Usage Widget**. The Settings window opens on first launch. Enter your credentials there; they are stored in your macOS login keychain, readable only by this app and its widget.
+
+**Session key (recommended)**
+
+1. Open [claude.ai](https://claude.ai) in your browser and sign in.
+2. Open Developer Tools → Application → Cookies → copy `sessionKey`.
+3. Open [claude.ai/api/organizations](https://claude.ai/api/organizations) in the same browser and copy the `uuid`.
+
+**OAuth token (optional)**: tokens from `claude setup-token` can't read usage, so leave this blank unless you have a token that can.
+
+Click **Save Configuration**. The app tests the connection right away and tells you what worked or what to fix.
+
+> Upgrading from an older version? Earlier versions read `~/.claude/claude-usage-widget.json`. This version never reads that file. Enter your credentials in the app, then delete the old file: `rm ~/.claude/claude-usage-widget.json`
 
 ### 3. Add Widget
 

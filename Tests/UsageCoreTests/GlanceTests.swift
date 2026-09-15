@@ -27,6 +27,27 @@ final class GlanceTests: XCTestCase {
         XCTAssertFalse(Headline.make(for: UsageSnapshot(fiveHourPercent: 20, fableWeeklyPercent: 89.9), metric: .fiveHour).hiddenLimitWarning)
     }
 
+    func testAutoSkipsLimitsAwaitingResetAndHiddenWarningsIgnoreThem() {
+        let snapshot = UsageSnapshot(fiveHourPercent: 100, fiveHourResetsAt: now.addingTimeInterval(-60),
+                                     weeklyPercent: 40, weeklyResetsAt: now.addingTimeInterval(86_400),
+                                     fableWeeklyPercent: 30, fableWeeklyResetsAt: now.addingTimeInterval(86_400))
+        let auto = Headline.make(for: snapshot, metric: .auto, now: now)
+        XCTAssertEqual(auto.text, "W 40%", "a window whose reset passed can't be the tightest current limit")
+        XCTAssertFalse(auto.awaitingReset)
+        let fixed = Headline.make(for: snapshot, metric: .weekly, now: now)
+        XCTAssertFalse(fixed.hiddenLimitWarning, "a 100% reading from an expired window is not a current warning")
+        let fiveHour = Headline.make(for: snapshot, metric: .fiveHour, now: now)
+        XCTAssertTrue(fiveHour.awaitingReset)
+        XCTAssertEqual(fiveHour.text, "5h 100%")
+    }
+
+    func testAutoFallsBackToAwaitingLimitsWhenNothingElseIsReported() {
+        let snapshot = UsageSnapshot(fiveHourPercent: 88, fiveHourResetsAt: now.addingTimeInterval(-60))
+        let headline = Headline.make(for: snapshot, metric: .auto, now: now)
+        XCTAssertEqual(headline.limit, .fiveHour)
+        XCTAssertTrue(headline.awaitingReset)
+    }
+
     func testMissingValuesShowADash() {
         XCTAssertEqual(Headline.make(for: UsageSnapshot(fiveHourPercent: 20), metric: .fableWeekly).text, "F —")
         let empty = Headline.make(for: nil, metric: .auto)
@@ -130,12 +151,18 @@ final class GlanceTests: XCTestCase {
     }
 
     func testFirstRefreshAfterLaunchWaitsForTheCachedReadingToAge() {
-        XCTAssertEqual(RefreshSchedule.firstRefresh(now: now, refreshSeconds: 120, lastSuccessAt: now.addingTimeInterval(-30), cooldown: nil),
-                       now.addingTimeInterval(90))
-        XCTAssertEqual(RefreshSchedule.firstRefresh(now: now, refreshSeconds: 120, lastSuccessAt: now.addingTimeInterval(-600), cooldown: nil), now)
-        XCTAssertEqual(RefreshSchedule.firstRefresh(now: now, refreshSeconds: 120, lastSuccessAt: nil, cooldown: nil), now)
-        let cooldown = Cooldown(until: now.addingTimeInterval(300), fromServer: true, needsReview: false)
-        XCTAssertEqual(RefreshSchedule.firstRefresh(now: now, refreshSeconds: 120, lastSuccessAt: nil, cooldown: cooldown),
-                       now.addingTimeInterval(300), "relaunching never skips a server cooldown")
+        func first(_ lastSuccess: Date?, snapshot: UsageSnapshot? = nil, cooldown: Cooldown? = nil) -> Date {
+            RefreshSchedule.firstRefresh(now: now, refreshSeconds: 900, lastSuccessAt: lastSuccess, snapshot: snapshot, cooldown: cooldown)
+        }
+        XCTAssertEqual(first(now.addingTimeInterval(-300)), now.addingTimeInterval(600))
+        XCTAssertEqual(first(now.addingTimeInterval(-3600)), now)
+        XCTAssertEqual(first(nil), now)
+        XCTAssertEqual(first(now.addingTimeInterval(3600)), now, "a reading dated in the future is ignored")
+        let upcomingReset = UsageSnapshot(fiveHourPercent: 90, fiveHourResetsAt: now.addingTimeInterval(300))
+        XCTAssertEqual(first(now.addingTimeInterval(-300), snapshot: upcomingReset), now.addingTimeInterval(330),
+                       "an upcoming reset is confirmed 30 s after it passes, even right after launch")
+        let cooldown = Cooldown(until: now.addingTimeInterval(1200), fromServer: true, needsReview: false)
+        XCTAssertEqual(first(nil, snapshot: upcomingReset, cooldown: cooldown), now.addingTimeInterval(1200),
+                       "relaunching never skips a server cooldown")
     }
 }

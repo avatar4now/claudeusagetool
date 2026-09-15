@@ -10,6 +10,10 @@ struct SharedUsageState: Codable, Equatable, Sendable {
     var fetchedAt: Date?
     var cooldown: Cooldown? = nil
     var credentialGeneration: String? = nil
+    /// While this is in the future the app is running and will publish again, so the widget shouldn't fetch.
+    var appHeartbeatUntil: Date? = nil
+    /// The app's latest problem, as fixed text, so the widget can show the same message without fetching.
+    var appErrorMessage: String? = nil
     var schemaVersion: Int = SharedUsageState.currentSchemaVersion
 
     func encoded() throws -> Data { try JSONEncoder().encode(self) }
@@ -33,6 +37,8 @@ extension SharedUsageState {
         fetchedAt = try container.decodeIfPresent(Date.self, forKey: .fetchedAt)
         cooldown = try container.decodeIfPresent(Cooldown.self, forKey: .cooldown)
         credentialGeneration = try container.decodeIfPresent(String.self, forKey: .credentialGeneration)
+        appHeartbeatUntil = try container.decodeIfPresent(Date.self, forKey: .appHeartbeatUntil)
+        appErrorMessage = try container.decodeIfPresent(String.self, forKey: .appErrorMessage)
         schemaVersion = try container.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 1
     }
 }
@@ -72,36 +78,81 @@ enum RefreshSchedule {
     }
 
     /// The last good numbers for these credentials, however old. Callers must label their age.
-    static func cachedSnapshot(in state: SharedUsageState?, generation: String?) -> (snapshot: UsageSnapshot, fetchedAt: Date)? {
+    static func cachedSnapshot(in state: SharedUsageState?, generation: String?) -> CachedReading? {
         guard matches(state, generation: generation), let snapshot = state?.snapshot, let fetchedAt = state?.fetchedAt else {
             return nil
         }
-        return (snapshot, fetchedAt)
+        return CachedReading(snapshot: snapshot, fetchedAt: fetchedAt)
     }
 
     /// When the next automatic refresh should happen: one interval from now, or shortly after an upcoming reset
     /// if that comes first. Never before a cooldown ends.
     static func nextRefresh(after now: Date, refreshSeconds: Int, snapshot: UsageSnapshot?, cooldown: Cooldown?) -> Date {
-        var next = now.addingTimeInterval(TimeInterval(sanitized(refreshSeconds)))
-        if let snapshot {
-            for kind in LimitKind.allCases {
-                guard let reset = snapshot.resetsAt(for: kind) else { continue }
-                let confirm = reset.addingTimeInterval(ResetBoundary.confirmationDelay)
-                if confirm > now, confirm < next { next = confirm }
-            }
-        }
-        if let cooldown, cooldown.until > next { next = cooldown.until }
+        let next = earliestResetConfirmation(in: snapshot, after: now,
+                                             before: now.addingTimeInterval(TimeInterval(sanitized(refreshSeconds))))
+        if let cooldown, cooldown.until > next { return cooldown.until }
         return next
     }
 
-    /// The first refresh after launch: wait until the cached reading is one interval old, and past any cooldown.
-    static func firstRefresh(now: Date, refreshSeconds: Int, lastSuccessAt: Date?, cooldown: Cooldown?) -> Date {
+    /// The first refresh after launch: wait until the cached reading is one interval old (or an upcoming reset passes),
+    /// and past any cooldown. A reading dated in the future is ignored.
+    static func firstRefresh(now: Date, refreshSeconds: Int, lastSuccessAt: Date?, snapshot: UsageSnapshot?,
+                             cooldown: Cooldown?) -> Date {
         var first = now
-        if let lastSuccessAt {
+        if let lastSuccessAt, lastSuccessAt.timeIntervalSince(now) <= grace {
             let due = lastSuccessAt.addingTimeInterval(TimeInterval(sanitized(refreshSeconds)))
-            if due > now { first = due }
+            if due > now { first = earliestResetConfirmation(in: snapshot, after: now, before: due) }
         }
         if let cooldown, cooldown.until > first { first = cooldown.until }
         return first
+    }
+
+    /// `before`, or 30 s after the first reset between `after` and `before` if one comes sooner.
+    private static func earliestResetConfirmation(in snapshot: UsageSnapshot?, after now: Date, before limit: Date) -> Date {
+        var next = limit
+        guard let snapshot else { return next }
+        for kind in LimitKind.allCases {
+            guard let reset = snapshot.resetsAt(for: kind) else { continue }
+            let confirm = reset.addingTimeInterval(ResetBoundary.confirmationDelay)
+            if confirm > now, confirm < next { next = confirm }
+        }
+        return next
+    }
+}
+
+/// A saved reading and when it was fetched.
+struct CachedReading: Equatable, Sendable {
+    let snapshot: UsageSnapshot
+    let fetchedAt: Date
+}
+
+/// What the widget does on each reload. The app owns fetching while it runs; the widget fetches only when the app
+/// is gone and nothing says to wait.
+enum WidgetPlan: Equatable, Sendable {
+    /// The app's numbers are recent: show them.
+    case showFresh(CachedReading)
+    /// The app is running and will publish soon: show what it last shared, with its latest problem, and don't fetch.
+    case waitForApp(cached: CachedReading?, notice: String?, until: Date)
+    /// A rate limit is in force: show the last numbers and wait.
+    case waitForCooldown(cached: CachedReading?, until: Date)
+    /// Nothing else applies: fetch, keeping the last numbers in case the fetch fails for an unclear reason.
+    case fetch(cached: CachedReading?)
+
+    static func decide(state: SharedUsageState?, generation: String?, widgetCooldown: Cooldown?, now: Date) -> WidgetPlan {
+        let cached = RefreshSchedule.cachedSnapshot(in: state, generation: generation)
+        if let fresh = RefreshSchedule.freshSnapshot(in: state, generation: generation, now: now), let cached {
+            return .showFresh(CachedReading(snapshot: fresh, fetchedAt: cached.fetchedAt))
+        }
+        if RefreshSchedule.matches(state, generation: generation), let heartbeat = state?.appHeartbeatUntil, heartbeat > now {
+            return .waitForApp(cached: cached, notice: state?.appErrorMessage, until: heartbeat)
+        }
+        let blocking = [RefreshSchedule.matches(state, generation: generation) ? state?.cooldown : nil, widgetCooldown]
+            .compactMap { $0 }
+            .filter { $0.blocks(at: now, manual: false) }
+            .max { $0.until < $1.until }
+        if let blocking {
+            return .waitForCooldown(cached: cached, until: blocking.until)
+        }
+        return .fetch(cached: cached)
     }
 }
