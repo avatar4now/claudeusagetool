@@ -16,7 +16,7 @@ struct UsageMenu: View {
                 cooldown: monitor.cooldown,
                 isRefreshing: monitor.isRefreshing,
                 refreshSeconds: monitor.refreshSeconds,
-                version: AppVersion.display,
+                version: AppVersion.current.shortText,
                 now: context.date,
                 onChangeRefreshInterval: { monitor.setRefreshInterval($0) },
                 onRefresh: { Task { await monitor.refresh(trigger: .manual) } },

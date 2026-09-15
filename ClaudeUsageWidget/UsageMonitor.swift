@@ -369,11 +369,6 @@ enum AppLaunch {
 }
 
 enum AppVersion {
-    /// Like "Version 1.3 (3)", read from the built app so it always matches what is running.
-    static var display: String {
-        let info = Bundle.main.infoDictionary
-        let version = info?["CFBundleShortVersionString"] as? String ?? "?"
-        let build = info?["CFBundleVersion"] as? String ?? "?"
-        return "Version \(version) (\(build))"
-    }
+    /// The running app's version and the code it was built from, read from its own Info.plist.
+    static let current = BuildInfo(infoDictionary: Bundle.main.infoDictionary)
 }

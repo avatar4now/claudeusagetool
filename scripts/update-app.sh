@@ -43,6 +43,22 @@ if [[ "${1:-}" != "--skip-tests" ]]; then
 fi
 
 echo "==> Building (Release)"
+# Record which code this build comes from, for Settings → About. If git can't answer, the build still goes ahead.
+build_commit=$(git rev-parse --short HEAD 2>/dev/null || true)
+build_branch=""
+if [[ -n "$build_commit" ]]; then
+  build_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+  # Only changes to tracked files count, so untracked folders like claude/ don't mark every build as modified.
+  if [[ -n "$(git status --porcelain --untracked-files=no 2>/dev/null || true)" ]]; then
+    build_commit="$build_commit-modified"
+  fi
+fi
+build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+if [[ -n "$build_commit" ]]; then
+  echo "    Commit $build_commit on ${build_branch:-an unknown branch}"
+else
+  echo "    No git commit found; Settings will show no commit for this build."
+fi
 # Build outside ~/Documents: iCloud file attributes there can break code signing.
 build_dir=$(mktemp -d -t claude-usage-build)
 built="$build_dir/DerivedData/Build/Products/Release/$app_name"
@@ -59,7 +75,9 @@ cleanup() {
 trap cleanup EXIT
 build_log="$build_dir/build.log"
 if ! xcodebuild -project "$project" -scheme "$scheme" -configuration Release -destination 'platform=macOS' \
-     -derivedDataPath "$build_dir/DerivedData" build >"$build_log" 2>&1; then
+     -derivedDataPath "$build_dir/DerivedData" \
+     CUW_BUILD_COMMIT="$build_commit" CUW_BUILD_BRANCH="$build_branch" CUW_BUILD_DATE="$build_date" \
+     build >"$build_log" 2>&1; then
   grep -E 'error:' "$build_log" | head -20 >&2 || true
   saved_log="$tmp_root/claude-usage-build-failed.log"
   cp "$build_log" "$saved_log"

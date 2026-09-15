@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CUWBuildBranch</key>
+	<string>$(CUW_BUILD_BRANCH)</string>
+	<key>CUWBuildCommit</key>
+	<string>$(CUW_BUILD_COMMIT)</string>
+	<key>CUWBuildDate</key>
+	<string>$(CUW_BUILD_DATE)</string>
+</dict>
+</plist>

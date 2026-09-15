@@ -175,15 +175,14 @@ struct SettingsView: View {
                 .disabled(isChecking)
             }
 
+            about
+
             Spacer()
 
             HStack(alignment: .bottom) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Stored in your login keychain. Only this app and its widget can read it.")
-                    Text(AppVersion.display)
-                }
-                .font(.system(size: 10))
-                .foregroundStyle(.tertiary)
+                Text("Stored in your login keychain. Only this app and its widget can read it.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
                 Spacer()
                 Button("Quit Claude Usage Widget") {
                     NSApplication.shared.terminate(nil)
@@ -212,6 +211,51 @@ struct SettingsView: View {
             historySummary = "\(samples.count) readings since \(first.at.formatted(date: .abbreviated, time: .omitted))"
         } else {
             historySummary = "No readings saved yet"
+        }
+    }
+
+    /// Which version is running and which code it was built from.
+    private var about: some View {
+        let build = AppVersion.current
+        return GroupBox("About") {
+            VStack(alignment: .leading, spacing: 6) {
+                aboutRow("Version") {
+                    Text("\(build.version) (\(build.build))")
+                }
+                aboutRow("Built") {
+                    Text(build.builtText())
+                }
+                aboutRow("Commit") {
+                    if let commit = build.displayCommit {
+                        Text(commit)
+                            .font(.system(.callout, design: .monospaced))
+                            .textSelection(.enabled)
+                        if build.isModified {
+                            Text("includes uncommitted changes")
+                                .foregroundStyle(.secondary)
+                        }
+                    } else {
+                        Text("—")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                aboutRow("Branch") {
+                    Text(build.branch ?? "—")
+                        .foregroundStyle(build.branch == nil ? .secondary : .primary)
+                }
+            }
+            .font(.callout)
+            .padding(8)
+        }
+    }
+
+    /// One line of the About box: a label in the same column as the pickers above, then its value.
+    private func aboutRow<Value: View>(_ label: String, @ViewBuilder value: () -> Value) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(label)
+                .frame(width: 140, alignment: .leading)
+            value()
+            Spacer()
         }
     }
 
