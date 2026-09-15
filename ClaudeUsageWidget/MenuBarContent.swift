@@ -2,15 +2,15 @@ import SwiftUI
 
 // Pure views with no live state, so they can be rendered and checked in isolation.
 
-/// The symbol and headline shown in the menu bar, such as "F 94%".
+/// The symbol and headline shown in the menu bar, such as "F 94%" or "5h 22% ⚠︎F".
 struct MenuBarLabel: View {
     let headline: Headline
     let isStale: Bool
     /// True when there are no numbers to show because something is wrong.
     let hasProblem: Bool
 
-    /// The main symbol says whether the number is current. A second symbol flags a nearly full limit that isn't shown,
-    /// so a stale reading and a hidden-limit warning can both be visible at once.
+    /// The symbol says whether the number is current. The menu bar draws only the first image in a label, so a nearly
+    /// full limit that isn't shown is flagged in the text instead, and a stale reading and a warning can both be seen.
     var symbol: String {
         if hasProblem { return "exclamationmark.triangle" }
         if isStale { return "clock.badge.exclamationmark" }
@@ -23,7 +23,7 @@ struct MenuBarLabel: View {
         if let limit = headline.limit {
             parts.append("\(limit.title), \(headline.text.split(separator: " ").last.map(String.init) ?? "")")
         }
-        if headline.hiddenLimitWarning { parts.append("another limit is above 90 percent") }
+        if let warning = headline.hiddenWarningSummary { parts.append(warning) }
         if headline.awaitingReset { parts.append("waiting to confirm the reset") }
         if isStale { parts.append("data is out of date") }
         if hasProblem { parts.append("needs attention") }
@@ -33,10 +33,7 @@ struct MenuBarLabel: View {
     var body: some View {
         HStack(spacing: 4) {
             Image(systemName: symbol)
-            if headline.hiddenLimitWarning && !hasProblem {
-                Image(systemName: "exclamationmark.triangle.fill")
-            }
-            Text(headline.text)
+            Text(headline.menuBarText)
                 .monospacedDigit()
         }
         .accessibilityElement(children: .ignore)

@@ -127,17 +127,35 @@ enum MenuBarMetric: String, CaseIterable, Sendable {
 struct Headline: Equatable, Sendable {
     let limit: LimitKind?
     let text: String
-    /// True when a limit the menu bar isn't showing is at or above 90%.
-    let hiddenLimitWarning: Bool
+    /// Limits the menu bar isn't showing that are at or above 90% and haven't passed their reset, in display order.
+    let hiddenWarningLimits: [LimitKind]
     /// True when the shown limit's reset time has passed but no new reading has confirmed it.
     let awaitingReset: Bool
 
     static let hiddenWarningThreshold = 90.0
+    /// The warning sign drawn as a plain text glyph (not a color emoji), so it matches the menu bar's text.
+    static let warningSign = "\u{26A0}\u{FE0E}"
+
+    /// True when a limit the menu bar isn't showing is at or above 90%.
+    var hiddenLimitWarning: Bool { !hiddenWarningLimits.isEmpty }
+
+    /// The menu bar's text, such as "5h 22% ⚠︎F". The menu bar draws only one symbol, so the warning is part of the text.
+    var menuBarText: String {
+        guard hiddenLimitWarning else { return text }
+        return "\(text) \(Self.warningSign)" + hiddenWarningLimits.map(\.shortLabel).joined(separator: " ")
+    }
+
+    /// Names the hidden limits for VoiceOver, such as "Weekly · Fable is above 90 percent". Nil when there are none.
+    var hiddenWarningSummary: String? {
+        guard hiddenLimitWarning else { return nil }
+        let names = hiddenWarningLimits.map(\.title).joined(separator: " and ")
+        return "\(names) \(hiddenWarningLimits.count == 1 ? "is" : "are") above 90 percent"
+    }
 
     /// "Closest to full" picks the highest reported percentage among windows that haven't reset yet; ties go to
     /// the earlier limit in display order. That is not a forecast of which limit you'll hit first.
     static func make(for snapshot: UsageSnapshot?, metric: MenuBarMetric, now: Date = Date()) -> Headline {
-        let empty = Headline(limit: nil, text: "—", hiddenLimitWarning: false, awaitingReset: false)
+        let empty = Headline(limit: nil, text: "—", hiddenWarningLimits: [], awaitingReset: false)
         guard let snapshot else { return empty }
         let reported = LimitKind.allCases.compactMap { kind in snapshot.percent(for: kind).map { (kind, $0) } }
         let current = reported.filter { !ResetBoundary.isAwaitingReset(snapshot.resetsAt(for: $0.0), now: now) }
@@ -149,8 +167,8 @@ struct Headline: Equatable, Sendable {
         }
         guard let shown else { return empty }
         let text = "\(shown.shortLabel) \(UsageFormatting.percentText(snapshot.percent(for: shown)))"
-        let warning = current.contains { $0.0 != shown && $0.1 >= hiddenWarningThreshold }
-        return Headline(limit: shown, text: text, hiddenLimitWarning: warning,
+        let warnings = current.filter { $0.0 != shown && $0.1 >= hiddenWarningThreshold }.map(\.0)
+        return Headline(limit: shown, text: text, hiddenWarningLimits: warnings,
                         awaitingReset: ResetBoundary.isAwaitingReset(snapshot.resetsAt(for: shown), now: now))
     }
 

@@ -48,6 +48,55 @@ final class GlanceTests: XCTestCase {
         XCTAssertTrue(headline.awaitingReset)
     }
 
+    func testHiddenWarningLimitsListEveryHighHiddenLimitInDisplayOrder() {
+        let snapshot = UsageSnapshot(fiveHourPercent: 22, weeklyPercent: 91, fableWeeklyPercent: 94)
+        let headline = Headline.make(for: snapshot, metric: .fiveHour)
+        XCTAssertEqual(headline.hiddenWarningLimits, [.weekly, .fableWeekly])
+        XCTAssertTrue(headline.hiddenLimitWarning)
+
+        let fableOnly = Headline.make(for: UsageSnapshot(fiveHourPercent: 24, weeklyPercent: 89.9, fableWeeklyPercent: 94),
+                                      metric: .fiveHour)
+        XCTAssertEqual(fableOnly.hiddenWarningLimits, [.fableWeekly], "89.9% is below the warning line")
+
+        let exactly = Headline.make(for: UsageSnapshot(fiveHourPercent: 24, weeklyPercent: 90), metric: .fiveHour)
+        XCTAssertEqual(exactly.hiddenWarningLimits, [.weekly], "90% itself is a warning")
+    }
+
+    func testHiddenWarningLimitsNeverIncludeTheShownLimitOrLimitsAwaitingReset() {
+        let snapshot = UsageSnapshot(fiveHourPercent: 22, fiveHourResetsAt: now.addingTimeInterval(3600),
+                                     weeklyPercent: 95, weeklyResetsAt: now.addingTimeInterval(-60),
+                                     fableWeeklyPercent: 96, fableWeeklyResetsAt: now.addingTimeInterval(86_400))
+        let headline = Headline.make(for: snapshot, metric: .fiveHour, now: now)
+        XCTAssertEqual(headline.hiddenWarningLimits, [.fableWeekly], "a passed reset isn't a current warning")
+
+        let shown = Headline.make(for: snapshot, metric: .fableWeekly, now: now)
+        XCTAssertEqual(shown.hiddenWarningLimits, [], "the shown limit doesn't warn about itself")
+        XCTAssertFalse(shown.hiddenLimitWarning)
+        XCTAssertEqual(Headline.make(for: nil, metric: .auto).hiddenWarningLimits, [])
+    }
+
+    func testMenuBarTextAddsATextStyleWarningSignAndTheHiddenLimitLabels() {
+        let one = Headline.make(for: UsageSnapshot(fiveHourPercent: 22, weeklyPercent: 89, fableWeeklyPercent: 94), metric: .fiveHour)
+        XCTAssertEqual(one.menuBarText, "5h 22% \u{26A0}\u{FE0E}F")
+
+        let two = Headline.make(for: UsageSnapshot(fiveHourPercent: 22, weeklyPercent: 91, fableWeeklyPercent: 94), metric: .fiveHour)
+        XCTAssertEqual(two.menuBarText, "5h 22% \u{26A0}\u{FE0E}W F")
+
+        let none = Headline.make(for: UsageSnapshot(fiveHourPercent: 22, weeklyPercent: 40), metric: .fiveHour)
+        XCTAssertEqual(none.menuBarText, none.text)
+        XCTAssertEqual(Headline.make(for: nil, metric: .auto).menuBarText, "—")
+    }
+
+    func testHiddenWarningSummaryNamesTheLimitsByTitle() {
+        let one = Headline.make(for: UsageSnapshot(fiveHourPercent: 22, fableWeeklyPercent: 94), metric: .fiveHour)
+        XCTAssertEqual(one.hiddenWarningSummary, "Weekly · Fable is above 90 percent")
+
+        let two = Headline.make(for: UsageSnapshot(fiveHourPercent: 22, weeklyPercent: 91, fableWeeklyPercent: 94), metric: .fiveHour)
+        XCTAssertEqual(two.hiddenWarningSummary, "Weekly · all models and Weekly · Fable are above 90 percent")
+
+        XCTAssertNil(Headline.make(for: UsageSnapshot(fiveHourPercent: 22), metric: .fiveHour).hiddenWarningSummary)
+    }
+
     func testMissingValuesShowADash() {
         XCTAssertEqual(Headline.make(for: UsageSnapshot(fiveHourPercent: 20), metric: .fableWeekly).text, "F —")
         let empty = Headline.make(for: nil, metric: .auto)
