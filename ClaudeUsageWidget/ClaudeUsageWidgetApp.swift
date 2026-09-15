@@ -4,17 +4,22 @@ import SwiftUI
 struct ClaudeUsageWidgetApp: App {
     /// One monitor feeds both the menu bar and the settings window.
     @StateObject private var monitor = UsageMonitor()
+    @StateObject private var loginItem = LoginItemController()
 
     var body: some Scene {
         Window("Claude Usage Widget", id: AppWindow.settings) {
-            ContentView(monitor: monitor)
+            ContentView(monitor: monitor, loginItem: loginItem)
         }
         .windowResizability(.contentMinSize)
+        .defaultLaunchBehavior(AppLaunch.showsSettingsAtLaunch ? .presented : .suppressed)
+        .restorationBehavior(.disabled)
 
         MenuBarExtra {
             UsageMenu(monitor: monitor)
         } label: {
-            MenuBarLabel(snapshot: monitor.report?.snapshot, error: monitor.error)
+            MenuBarLabel(headline: monitor.headline,
+                         isStale: monitor.isStale,
+                         hasProblem: monitor.snapshot == nil && monitor.error != nil)
         }
         .menuBarExtraStyle(.window)
     }

@@ -20,20 +20,38 @@ extension Color {
 }
 
 /// A rounded usage bar, used by the widget and the menu bar panel.
+/// `paceFraction` draws a thin tick where an even spread would be by now; `isUnknown` draws an empty, dimmed track.
 struct UsageProgressBar: View {
     let utilization: Int
     let height: CGFloat
+    var paceFraction: Double? = nil
+    var isUnknown: Bool = false
 
     var body: some View {
         GeometryReader { geo in
             ZStack(alignment: .leading) {
                 RoundedRectangle(cornerRadius: height / 2)
-                    .fill(Color.primary.opacity(0.12))
-                RoundedRectangle(cornerRadius: height / 2)
-                    .fill(Color.progressGradient(for: utilization))
-                    .frame(width: max(0, geo.size.width * CGFloat(min(utilization, 100)) / 100.0))
+                    .fill(Color.primary.opacity(isUnknown ? 0.06 : 0.12))
+                if !isUnknown {
+                    RoundedRectangle(cornerRadius: height / 2)
+                        .fill(Color.progressGradient(for: utilization))
+                        .frame(width: max(0, geo.size.width * CGFloat(min(utilization, 100)) / 100.0))
+                }
+                if let paceFraction {
+                    RoundedRectangle(cornerRadius: 1)
+                        .fill(Color.primary.opacity(0.75))
+                        .frame(width: 2, height: height + 4)
+                        .offset(x: max(0, min(geo.size.width - 2, geo.size.width * CGFloat(paceFraction) - 1)))
+                }
             }
+            .frame(height: geo.size.height)
         }
         .frame(height: height)
+        .accessibilityHidden(true)
     }
+}
+
+extension LimitDisplay {
+    var percentText: String { percent.map { "\($0)%" } ?? "—" }
+    var color: Color { percent.map { Color.usageColor(for: $0) } ?? Color.secondary }
 }

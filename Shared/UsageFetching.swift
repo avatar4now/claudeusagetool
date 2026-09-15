@@ -8,10 +8,20 @@ enum UsageError: Error, Equatable, Sendable {
     case invalidCredentials
     /// The Anthropic API refused the OAuth token (401): it is wrong, revoked, or expired.
     case tokenRejected
-    /// The OAuth token is valid but may not read usage (403). Tokens from `claude setup-token` land here.
+    /// The OAuth token is valid but may not read usage (403 "scope requirement"). Tokens from `claude setup-token` land here.
     case tokenCannotReadUsage
-    /// claude.ai refused the session key (401 or 403): it expired, or that browser signed out.
+    /// claude.ai confirmed the session is invalid (account_session_invalid): the key expired or that browser signed out.
     case sessionKeyRejected
+    /// A Cloudflare bot check answered instead of claude.ai. The key may be fine.
+    case blockedByCloudflare
+    /// A 401 or 403 without evidence of the cause. The last good numbers stay, marked stale.
+    case accessDenied(Int)
+    /// 429 Too Many Requests, with the server's requested wait if it sent one.
+    case rateLimited(retryAfter: TimeInterval?)
+    /// The service answered with a redirect, which the app refuses to follow with credentials attached.
+    case redirected
+    /// The app's own destination rules stopped the request before it was sent.
+    case requestBlocked
     case http(Int)
     case network
     case invalidResponse
@@ -25,7 +35,11 @@ enum UsageError: Error, Equatable, Sendable {
         case .tokenRejected: return "OAuth token rejected (401). Paste a new one in the app."
         case .tokenCannotReadUsage: return "This OAuth token can't read usage. Use a session key instead."
         case .sessionKeyRejected: return "Session key expired or signed out. Paste a new session key."
-        case .http(429): return "Rate limited (429). Retrying on the next refresh."
+        case .blockedByCloudflare: return "claude.ai showed a bot check. Retrying later; your key may be fine."
+        case .accessDenied(let code): return "Access denied (\(code)) for an unclear reason. Retrying later."
+        case .rateLimited: return "Rate limited by the usage service. Waiting before trying again."
+        case .redirected: return "The usage service redirected the request, so it was stopped."
+        case .requestBlocked: return "The request was blocked by the app's safety rules."
         case .http(let code): return "Usage service returned HTTP \(code)."
         case .network: return "Network unavailable. Retrying on the next refresh."
         case .invalidResponse: return "Unexpected response from the usage service."
@@ -34,33 +48,107 @@ enum UsageError: Error, Equatable, Sendable {
     }
 }
 
+/// The parts of a failed response needed to classify it. The body is capped and never logged or stored.
+struct HTTPFailure: Equatable, Sendable {
+    static let bodyLimit = 4096
+
+    let status: Int
+    let contentType: String?
+    let cfMitigated: String?
+    let retryAfter: String?
+    let bodyPrefix: Data
+}
+
+/// What happened to one request.
+enum TransportResult: Sendable {
+    case ok(Data)
+    case http(HTTPFailure)
+    case redirected
+    /// Stopped by ClaudeEndpoints.isAllowed before sending.
+    case refused
+    case network
+}
+
+/// Turns a failed response into a UsageError, using explicit evidence rather than the status code alone.
+enum ResponseClassifier {
+    static func classify(_ failure: HTTPFailure, route: CredentialRoute, now: Date) -> UsageError {
+        let status = failure.status
+        if (300..<400).contains(status) { return .redirected }
+        if status == 429 { return .rateLimited(retryAfter: RetryAfter.parse(failure.retryAfter, now: now)) }
+        guard status == 401 || status == 403 else { return .http(status) }
+
+        if isCloudflareChallenge(failure) { return .blockedByCloudflare }
+        let error = errorObject(failure.bodyPrefix)
+
+        switch route {
+        case .oauthToken:
+            if status == 401 { return .tokenRejected }
+            if let message = error?.message, message.localizedCaseInsensitiveContains("scope requirement") {
+                return .tokenCannotReadUsage
+            }
+        case .sessionKey:
+            if error?.errorCode == "account_session_invalid" { return .sessionKeyRejected }
+            if status == 401, error?.type == "authentication_error" { return .sessionKeyRejected }
+        }
+        return .accessDenied(status)
+    }
+
+    /// Cloudflare marks challenges with a cf-mitigated header, and its challenge pages load /cdn-cgi/challenge-platform.
+    private static func isCloudflareChallenge(_ failure: HTTPFailure) -> Bool {
+        if failure.cfMitigated?.localizedCaseInsensitiveContains("challenge") == true { return true }
+        guard failure.contentType?.localizedCaseInsensitiveContains("text/html") == true else { return false }
+        return String(decoding: failure.bodyPrefix, as: UTF8.self).contains("/cdn-cgi/challenge-platform")
+    }
+
+    private struct ErrorFields {
+        let type: String?
+        let message: String?
+        let errorCode: String?
+    }
+
+    /// Reads {"error":{"type","message","details":{"error_code"}}} from a JSON body, if present.
+    private static func errorObject(_ body: Data) -> ErrorFields? {
+        guard let json = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any],
+              let error = json["error"] as? [String: Any] else { return nil }
+        let details = error["details"] as? [String: Any]
+        return ErrorFields(type: error["type"] as? String, message: error["message"] as? String,
+                           errorCode: details?["error_code"] as? String)
+    }
+}
+
 /// Decides whether to retry with the claude.ai session key after the OAuth route fails.
 ///
-/// The session key is a full claude.ai login, so it is only used when the OAuth token itself was refused.
-/// Being offline, rate limited, or hitting a server error would affect both routes alike.
+/// The session key is a full claude.ai login, so it is only used when the token itself is confirmed unusable.
+/// An unclear 403, a bot check, a rate limit, or a network problem would not be fixed by switching credentials.
 enum FallbackPolicy {
-    static func shouldTrySessionKey(afterOAuthFailure error: UsageError) -> Bool {
+    static func shouldTrySessionKey(afterTokenFailure error: UsageError) -> Bool {
         switch error {
-        case .http(401), .http(403): return true
+        case .tokenRejected, .tokenCannotReadUsage: return true
         default: return false
         }
     }
 }
 
-/// Decides whether the menu bar keeps showing the last good numbers after a failed refresh.
-/// Temporary problems keep them; credential problems clear them so stale numbers don't look current.
+/// Decides whether the last good numbers stay on screen (marked stale) after a failed refresh.
+/// Confirmed credential problems clear them; anything unclear or temporary keeps them.
 enum RefreshPolicy {
     static func keepsLastReport(after error: UsageError) -> Bool {
         switch error {
-        case .network, .http: return true
-        default: return false
+        case .network, .http, .rateLimited, .blockedByCloudflare, .accessDenied, .invalidResponse, .redirected, .requestBlocked:
+            return true
+        case .noCredentials, .invalidOrganizationId, .invalidCredentials, .tokenRejected, .tokenCannotReadUsage,
+             .sessionKeyRejected, .keychain:
+            return false
         }
     }
 }
 
 /// The only two places the app and widget ever send a credential.
 enum ClaudeEndpoints {
-    static let oauthUsageURL = URL(string: "https://api.anthropic.com/api/oauth/usage")!
+    static let oauthHost = "api.anthropic.com"
+    static let oauthPath = "/api/oauth/usage"
+    static let sessionHost = "claude.ai"
+    static let oauthUsageURL = URL(string: "https://\(oauthHost)\(oauthPath)")!
 
     /// Returns nil for a token that could break the Authorization header.
     static func oauthRequest(token: String) -> URLRequest? {
@@ -77,11 +165,32 @@ enum ClaudeEndpoints {
     static func sessionKeyRequest(sessionKey: String, organizationId: String) -> URLRequest? {
         guard WidgetConfig.isSafeSessionKey(sessionKey),
               let uuid = UUID(uuidString: organizationId),
-              let url = URL(string: "https://claude.ai/api/organizations/\(uuid.uuidString.lowercased())/usage")
+              let url = URL(string: "https://\(sessionHost)/api/organizations/\(uuid.uuidString.lowercased())/usage")
         else { return nil }
         var request = baseRequest(url)
         request.setValue("sessionKey=\(sessionKey)", forHTTPHeaderField: "Cookie")
         return request
+    }
+
+    /// The final check before anything is sent: HTTPS to an exact approved address, with the session cookie
+    /// only going to claude.ai and the OAuth token only going to api.anthropic.com.
+    static func isAllowed(_ request: URLRequest) -> Bool {
+        guard let url = request.url, url.scheme == "https", url.user == nil, url.port == nil,
+              url.query == nil, url.fragment == nil, let host = url.host else { return false }
+        let hasCookie = request.value(forHTTPHeaderField: "Cookie") != nil
+        let hasBearer = request.value(forHTTPHeaderField: "Authorization") != nil
+        switch host {
+        case oauthHost:
+            return url.path == oauthPath && !hasCookie
+        case sessionHost:
+            let parts = url.path.split(separator: "/", omittingEmptySubsequences: false)
+            guard parts.count == 5, parts[0].isEmpty, parts[1] == "api", parts[2] == "organizations",
+                  parts[4] == "usage", let uuid = UUID(uuidString: String(parts[3])),
+                  uuid.uuidString.lowercased() == parts[3] else { return false }
+            return !hasBearer
+        default:
+            return false
+        }
     }
 
     private static func baseRequest(_ url: URL) -> URLRequest {
@@ -100,7 +209,7 @@ struct UsageSnapshot: Codable, Equatable, Sendable {
     var fableWeeklyResetsAt: Date?
 }
 
-enum CredentialRoute: Equatable, Sendable {
+enum CredentialRoute: String, Codable, Equatable, Sendable {
     case oauthToken
     case sessionKey
 }
@@ -114,21 +223,21 @@ struct UsageReport: Equatable, Sendable {
 }
 
 enum UsageParser {
-    /// Reads the usage response the same way Claude Code's /usage screen does.
-    /// A missing value stays unknown rather than becoming 0.
-    static func parse(_ data: Data) throws -> UsageSnapshot {
+    /// Reads the usage response the same way Claude Code's /usage screen does, then sanity-checks it.
+    /// Missing or impossible values stay unknown rather than becoming 0 or being clamped into range.
+    static func parse(_ data: Data, now: Date = Date()) throws -> UsageSnapshot {
         guard let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
             throw UsageError.invalidResponse
         }
         let fiveHour = json["five_hour"] as? [String: Any]
         let weekly = json["seven_day"] as? [String: Any]
         let fable = fableWeeklyLimit(in: json["limits"])
-        let snapshot = UsageSnapshot(fiveHourPercent: number(fiveHour?["utilization"]),
-                                     fiveHourResetsAt: date(fiveHour?["resets_at"]),
-                                     weeklyPercent: number(weekly?["utilization"]),
-                                     weeklyResetsAt: date(weekly?["resets_at"]),
-                                     fableWeeklyPercent: number(fable?["percent"]),
-                                     fableWeeklyResetsAt: date(fable?["resets_at"]))
+        let snapshot = UsageSnapshot(fiveHourPercent: percent(fiveHour?["utilization"]),
+                                     fiveHourResetsAt: resetDate(fiveHour?["resets_at"], now: now),
+                                     weeklyPercent: percent(weekly?["utilization"]),
+                                     weeklyResetsAt: resetDate(weekly?["resets_at"], now: now),
+                                     fableWeeklyPercent: percent(fable?["percent"]),
+                                     fableWeeklyResetsAt: resetDate(fable?["resets_at"], now: now))
         guard snapshot.fiveHourPercent != nil || snapshot.weeklyPercent != nil || snapshot.fableWeeklyPercent != nil else {
             throw UsageError.invalidResponse
         }
@@ -145,6 +254,20 @@ enum UsageParser {
                   let name = model["display_name"] as? String else { return false }
             return name.localizedCaseInsensitiveContains("fable")
         }
+    }
+
+    /// A percentage from 0 to 100. Anything else is unknown, so a scale change can't masquerade as a real reading.
+    static func percent(_ value: Any?) -> Double? {
+        guard let number = number(value), (0...100).contains(number) else { return nil }
+        return number
+    }
+
+    /// A reset time no more than a day in the past and no more than eight days ahead.
+    static func resetDate(_ value: Any?, now: Date) -> Date? {
+        guard let date = date(value),
+              date >= now.addingTimeInterval(-86_400),
+              date <= now.addingTimeInterval(8 * 86_400) else { return nil }
+        return date
     }
 
     /// A finite JSON number. JSON true/false also arrive as NSNumber, so they are excluded.
@@ -167,8 +290,13 @@ enum UsageParser {
 
 /// Fetches usage over the OAuth route first, and over the session key only when FallbackPolicy allows it.
 struct UsageFetcher {
-    /// Sends one request and returns the body of a 200 response. Tests swap in a fake.
-    var send: (URLRequest) async -> Result<Data, UsageError>
+    /// Sends one request. Tests swap in a fake.
+    var send: (URLRequest) async -> TransportResult
+    var now: () -> Date = Date.init
+
+    init(send: @escaping (URLRequest) async -> TransportResult) {
+        self.send = send
+    }
 
     func fetch(config: WidgetConfig) async -> Result<UsageReport, UsageError> {
         var tokenFailure: UsageError?
@@ -176,81 +304,90 @@ struct UsageFetcher {
         // Stored values were validated when saved; these checks are a tripwire in case the keychain item was altered.
         if let token = config.oauthToken {
             guard let request = ClaudeEndpoints.oauthRequest(token: token) else { return .failure(.invalidCredentials) }
-            switch await attempt(request) {
+            switch await attempt(request, route: .oauthToken) {
             case .success(let snapshot):
                 return .success(UsageReport(snapshot: snapshot, route: .oauthToken))
             case .failure(let error):
-                guard config.sessionKey != nil, FallbackPolicy.shouldTrySessionKey(afterOAuthFailure: error) else {
-                    return .failure(Self.named(tokenError: error))
+                guard config.sessionKey != nil, FallbackPolicy.shouldTrySessionKey(afterTokenFailure: error) else {
+                    return .failure(error)
                 }
-                tokenFailure = Self.named(tokenError: error)
+                tokenFailure = error
             }
         }
 
-        // Past this point the token is absent or known not to work, so the session key's result is the one to report.
+        // Past this point the token is absent or confirmed unusable, so the session key's result is the one to report.
         guard let sessionKey = config.sessionKey else { return .failure(.noCredentials) }
         guard WidgetConfig.isSafeSessionKey(sessionKey) else { return .failure(.invalidCredentials) }
         guard let organizationId = config.validatedOrganizationId,
               let request = ClaudeEndpoints.sessionKeyRequest(sessionKey: sessionKey, organizationId: organizationId)
         else { return .failure(.invalidOrganizationId) }
 
-        switch await attempt(request) {
+        switch await attempt(request, route: .sessionKey) {
         case .success(let snapshot):
             return .success(UsageReport(snapshot: snapshot, route: .sessionKey, tokenFailure: tokenFailure))
-        case .failure(let error):
-            return .failure(Self.named(sessionKeyError: error))
-        }
-    }
-
-    private func attempt(_ request: URLRequest) async -> Result<UsageSnapshot, UsageError> {
-        switch await send(request) {
-        case .success(let data):
-            do { return .success(try UsageParser.parse(data)) } catch { return .failure(.invalidResponse) }
         case .failure(let error):
             return .failure(error)
         }
     }
 
-    /// Turns the OAuth route's 401 and 403 into errors that say what to do.
-    static func named(tokenError error: UsageError) -> UsageError {
-        switch error {
-        case .http(401): return .tokenRejected
-        case .http(403): return .tokenCannotReadUsage
-        default: return error
-        }
-    }
-
-    /// claude.ai answers an expired or signed-out session with 403 (sometimes 401).
-    static func named(sessionKeyError error: UsageError) -> UsageError {
-        switch error {
-        case .http(401), .http(403): return .sessionKeyRejected
-        default: return error
+    private func attempt(_ request: URLRequest, route: CredentialRoute) async -> Result<UsageSnapshot, UsageError> {
+        switch await send(request) {
+        case .ok(let data):
+            do { return .success(try UsageParser.parse(data, now: now())) } catch { return .failure(.invalidResponse) }
+        case .http(let failure):
+            return .failure(ResponseClassifier.classify(failure, route: route, now: now()))
+        case .redirected:
+            return .failure(.redirected)
+        case .refused:
+            return .failure(.requestBlocked)
+        case .network:
+            return .failure(.network)
         }
     }
 }
 
 extension UsageFetcher {
-    /// The real network. The session is ephemeral, so no cookies, cache, or credentials are written to disk.
+    /// The real network. The session is ephemeral (no cookies, cache, or credentials written to disk) and refuses redirects.
     static var live: UsageFetcher {
-        UsageFetcher { request in
-            do {
-                let (data, response) = try await LiveSession.shared.data(for: request)
-                guard let http = response as? HTTPURLResponse else { return .failure(.invalidResponse) }
-                guard http.statusCode == 200 else { return .failure(.http(http.statusCode)) }
-                return .success(data)
-            } catch {
-                return .failure(.network)
-            }
-        }
+        UsageFetcher(send: LiveTransport.send)
     }
 }
 
-private enum LiveSession {
-    static let shared: URLSession = {
+enum LiveTransport {
+    static let session: URLSession = {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.httpShouldSetCookies = false
         configuration.httpCookieAcceptPolicy = .never
         configuration.urlCache = nil
-        return URLSession(configuration: configuration)
+        return URLSession(configuration: configuration, delegate: RedirectRefusingDelegate(), delegateQueue: nil)
     }()
+
+    static func send(_ request: URLRequest) async -> TransportResult {
+        guard ClaudeEndpoints.isAllowed(request) else { return .refused }
+        do {
+            let (data, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse else { return .network }
+            if (300..<400).contains(http.statusCode) { return .redirected }
+            guard http.statusCode == 200 else {
+                return .http(HTTPFailure(status: http.statusCode,
+                                         contentType: http.value(forHTTPHeaderField: "Content-Type"),
+                                         cfMitigated: http.value(forHTTPHeaderField: "cf-mitigated"),
+                                         retryAfter: http.value(forHTTPHeaderField: "Retry-After"),
+                                         bodyPrefix: Data(data.prefix(HTTPFailure.bodyLimit))))
+            }
+            return .ok(data)
+        } catch {
+            return .network
+        }
+    }
+}
+
+/// Stops every redirect, so a credential can't follow a request to a login page or another host.
+final class RedirectRefusingDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    nonisolated func urlSession(_ session: URLSession, task: URLSessionTask,
+                                willPerformHTTPRedirection response: HTTPURLResponse,
+                                newRequest request: URLRequest,
+                                completionHandler: @escaping (URLRequest?) -> Void) {
+        completionHandler(nil)
+    }
 }

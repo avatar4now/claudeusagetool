@@ -23,27 +23,52 @@ final class RefreshScheduleTests: XCTestCase {
         XCTAssertEqual(RefreshSchedule.label(for: 900), "15 min")
     }
 
-    func testSharedSnapshotIsUsedWhileFresh() {
-        let state = SharedUsageState(refreshSeconds: 120, snapshot: snapshot, fetchedAt: now.addingTimeInterval(-170))
-        XCTAssertEqual(RefreshSchedule.freshSnapshot(in: state, now: now), snapshot, "within one interval plus a minute of grace")
+    func state(fetchedAgo seconds: TimeInterval?, generation: String? = "gen") -> SharedUsageState {
+        SharedUsageState(refreshSeconds: 120, snapshot: snapshot, fetchedAt: seconds.map { now.addingTimeInterval(-$0) },
+                         credentialGeneration: generation)
     }
 
-    func testSharedSnapshotIsIgnoredOnceStaleMissingOrFromTheFuture() {
-        XCTAssertNil(RefreshSchedule.freshSnapshot(in: nil, now: now))
-        XCTAssertNil(RefreshSchedule.freshSnapshot(
-            in: SharedUsageState(refreshSeconds: 120, snapshot: snapshot, fetchedAt: now.addingTimeInterval(-181)), now: now))
-        XCTAssertNil(RefreshSchedule.freshSnapshot(
-            in: SharedUsageState(refreshSeconds: 120, snapshot: nil, fetchedAt: now), now: now))
-        XCTAssertNil(RefreshSchedule.freshSnapshot(
-            in: SharedUsageState(refreshSeconds: 120, snapshot: snapshot, fetchedAt: nil), now: now))
-        XCTAssertNil(RefreshSchedule.freshSnapshot(
-            in: SharedUsageState(refreshSeconds: 120, snapshot: snapshot, fetchedAt: now.addingTimeInterval(120)), now: now),
-            "a clock change must not freeze old numbers on screen")
+    func testSharedSnapshotIsUsedWhileFreshAndForTheSameCredentials() {
+        XCTAssertEqual(RefreshSchedule.freshSnapshot(in: state(fetchedAgo: 170), generation: "gen", now: now), snapshot)
+    }
+
+    func testSharedSnapshotIsIgnoredOnceStaleMissingFromTheFutureOrFromOtherCredentials() {
+        XCTAssertNil(RefreshSchedule.freshSnapshot(in: nil, generation: "gen", now: now))
+        XCTAssertNil(RefreshSchedule.freshSnapshot(in: state(fetchedAgo: 181), generation: "gen", now: now))
+        XCTAssertNil(RefreshSchedule.freshSnapshot(in: state(fetchedAgo: nil), generation: "gen", now: now))
+        XCTAssertNil(RefreshSchedule.freshSnapshot(in: state(fetchedAgo: -120), generation: "gen", now: now),
+                     "a clock change must not freeze old numbers on screen")
+        XCTAssertNil(RefreshSchedule.freshSnapshot(in: state(fetchedAgo: 10), generation: "other", now: now))
+        XCTAssertNil(RefreshSchedule.freshSnapshot(in: state(fetchedAgo: 10, generation: nil), generation: nil, now: now),
+                     "an unknown generation gets no cached numbers")
+    }
+
+    func testCachedSnapshotIgnoresAgeButStillRequiresMatchingCredentials() {
+        let cached = RefreshSchedule.cachedSnapshot(in: state(fetchedAgo: 86_400), generation: "gen")
+        XCTAssertEqual(cached?.snapshot, snapshot)
+        XCTAssertEqual(cached?.fetchedAt, now.addingTimeInterval(-86_400))
+        XCTAssertNil(RefreshSchedule.cachedSnapshot(in: state(fetchedAgo: 10), generation: "other"))
+        XCTAssertNil(RefreshSchedule.cachedSnapshot(in: state(fetchedAgo: nil), generation: "gen"))
     }
 
     func testSharedStateRoundTripsThroughJSON() throws {
-        let state = SharedUsageState(refreshSeconds: 60, snapshot: UsageSnapshot(fiveHourPercent: 42.5, fableWeeklyPercent: 3,
-                                     fableWeeklyResetsAt: now), fetchedAt: now)
+        let state = SharedUsageState(refreshSeconds: 60,
+                                     snapshot: UsageSnapshot(fiveHourPercent: 42.5, fableWeeklyPercent: 3, fableWeeklyResetsAt: now),
+                                     fetchedAt: now,
+                                     cooldown: Cooldown(until: now.addingTimeInterval(90), fromServer: true, needsReview: false),
+                                     credentialGeneration: "gen")
         XCTAssertEqual(try SharedUsageState.decode(try state.encoded()), state)
+        XCTAssertEqual(state.schemaVersion, SharedUsageState.currentSchemaVersion)
+    }
+
+    func testOlderSharedStateStillDecodesAndNewerIsRefused() throws {
+        let older = Data(#"{"refreshSeconds":120,"fetchedAt":779999000}"#.utf8)
+        let decoded = try SharedUsageState.decode(older)
+        XCTAssertEqual(decoded.schemaVersion, 1)
+        XCTAssertNil(decoded.credentialGeneration)
+        XCTAssertNil(decoded.cooldown)
+
+        let newer = Data(#"{"refreshSeconds":120,"schemaVersion":99}"#.utf8)
+        XCTAssertThrowsError(try SharedUsageState.decode(newer))
     }
 }

@@ -1,14 +1,25 @@
 #!/bin/bash
-# Rebuilds Claude Usage Widget and restarts it, so the newest code is what runs on your Mac.
+# Builds Claude Usage Widget, checks the build, and installs it as the one copy in ~/Applications.
 #
-#   scripts/update-app.sh               run the tests, build, restart
-#   scripts/update-app.sh --skip-tests  build and restart only
+#   scripts/update-app.sh               run the tests, build, install, restart
+#   scripts/update-app.sh --skip-tests  skip the tests
+#
+# Running the app from Xcode creates a second copy in Xcode's build folder, which can confuse the widget.
+# Run this script again afterwards to put the installed copy back in charge.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 project=ClaudeUsageWidget.xcodeproj
 scheme=ClaudeUsageWidget
-destination='platform=macOS'
+app_name=ClaudeUsageWidget.app
+install_dir="$HOME/Applications"
+installed="$install_dir/$app_name"
+backup_dir="$HOME/Library/Application Support/ClaudeUsageWidget Backups"
+widget_id=dev.huan.ClaudeUsageWidget.WidgetExtension
+lsregister=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+expected_team=$(awk -F' = ' '/DEVELOPMENT_TEAM = /{gsub(/[;" ]/, "", $2); print $2; exit}' "$project/project.pbxproj")
+
+fail() { echo "✗ $*" >&2; exit 1; }
 
 if [[ "${1:-}" != "--skip-tests" ]]; then
   echo "==> Running tests"
@@ -17,37 +28,103 @@ if [[ "${1:-}" != "--skip-tests" ]]; then
     grep -E 'Executed [0-9]+ tests' "$test_log" | tail -1 | sed -E 's/^[[:space:]]+/    /'
   else
     grep -E 'error:|failed' "$test_log" | head -20 >&2 || true
-    echo "Tests failed, so the app was not rebuilt. Full log: $test_log" >&2
-    exit 1
+    fail "Tests failed, so nothing was installed. Full log: $test_log"
   fi
 fi
 
-echo "==> Building"
-log=$(mktemp -t claude-usage-build)
-if ! xcodebuild -project "$project" -scheme "$scheme" -configuration Debug -destination "$destination" build >"$log" 2>&1; then
-  grep -E 'error:' "$log" | head -20 >&2 || true
-  echo "Build failed. Full log: $log" >&2
-  exit 1
+echo "==> Building (Release)"
+# Build outside ~/Documents: iCloud file attributes there can break code signing.
+build_dir=$(mktemp -d -t claude-usage-build)
+trap 'rm -rf "$build_dir"' EXIT
+build_log="$build_dir/build.log"
+if ! xcodebuild -project "$project" -scheme "$scheme" -configuration Release -destination 'platform=macOS' \
+     -derivedDataPath "$build_dir/DerivedData" build >"$build_log" 2>&1; then
+  grep -E 'error:' "$build_log" | head -20 >&2 || true
+  cp "$build_log" "$TMPDIR/claude-usage-build-failed.log"
+  fail "Build failed, so nothing was installed. Full log: $TMPDIR/claude-usage-build-failed.log"
 fi
+built="$build_dir/DerivedData/Build/Products/Release/$app_name"
+appex="$built/Contents/PlugIns/ClaudeUsageWidgetExtension.appex"
+[[ -d "$built" && -d "$appex" ]] || fail "Build finished, but the app or its widget is missing."
 
-products=$(xcodebuild -project "$project" -scheme "$scheme" -configuration Debug -destination "$destination" \
-  -showBuildSettings 2>/dev/null | awk -F' = ' '/^ *BUILT_PRODUCTS_DIR = /{print $2; exit}')
-app="$products/ClaudeUsageWidget.app"
-if [[ ! -d "$app" ]]; then
-  echo "Build finished, but the app wasn't found at $app" >&2
-  exit 1
+echo "==> Checking signatures"
+codesign --verify --deep --strict "$built" || fail "The app's signature didn't verify."
+codesign --verify --strict "$appex" || fail "The widget's signature didn't verify."
+team_of() { codesign -dv "$1" 2>&1 | awk -F= '/^TeamIdentifier=/{print $2}'; }
+built_team=$(team_of "$built")
+[[ "$built_team" == "$expected_team" ]] || fail "Built with team '$built_team', expected '$expected_team'. Keychain access would break."
+[[ "$(team_of "$appex")" == "$expected_team" ]] || fail "The widget was signed by a different team than the app."
+if [[ -d "$installed" ]]; then
+  installed_team=$(team_of "$installed")
+  [[ -z "$installed_team" || "$installed_team" == "$built_team" ]] ||
+    fail "The installed copy is signed by team '$installed_team'. Installing over it could lock the app out of its keychain items."
 fi
+version=$(plutil -extract CFBundleShortVersionString raw "$built/Contents/Info.plist")
+build_number=$(plutil -extract CFBundleVersion raw "$built/Contents/Info.plist")
+echo "    Team $built_team, version $version ($build_number)"
 
-echo "==> Restarting the app and its widget"
-# Quit the old app, and stop the widget's background process so macOS starts the new one.
+echo "==> Stopping the running app and widget"
 pkill -x ClaudeUsageWidget 2>/dev/null || true
 pkill -x ClaudeUsageWidgetExtension 2>/dev/null || true
 for _ in {1..40}; do
   pgrep -x ClaudeUsageWidget >/dev/null || break
   sleep 0.25
 done
-open "$app"
 
-version=$(plutil -extract CFBundleShortVersionString raw "$app/Contents/Info.plist")
-build=$(plutil -extract CFBundleVersion raw "$app/Contents/Info.plist")
-echo "==> Now running version $version ($build). Look for the gauge icon in your menu bar."
+mkdir -p "$install_dir" "$backup_dir"
+if [[ -d "$installed" ]]; then
+  old_version=$(plutil -extract CFBundleShortVersionString raw "$installed/Contents/Info.plist" 2>/dev/null || echo unknown)
+  backup="$backup_dir/ClaudeUsageWidget-$old_version-$(date +%Y%m%d-%H%M%S).zip"
+  echo "==> Backing up the installed copy to $backup"
+  # A zip, not a loose .app, so macOS doesn't register the backup's widget as another copy.
+  ditto -c -k --keepParent "$installed" "$backup"
+  ls -1t "$backup_dir"/ClaudeUsageWidget-*.zip 2>/dev/null | tail -n +4 | while read -r old; do rm -f "$old"; done
+fi
+
+echo "==> Installing to $installed"
+staging="$install_dir/.ClaudeUsageWidget-installing.app"
+previous="$install_dir/.ClaudeUsageWidget-previous.app"
+rm -rf "$staging" "$previous"
+ditto "$built" "$staging"
+codesign --verify --deep --strict "$staging" || { rm -rf "$staging"; fail "The copied app didn't verify; the installed copy was left alone."; }
+if [[ -d "$installed" ]]; then mv "$installed" "$previous"; fi
+if ! mv "$staging" "$installed"; then
+  [[ -d "$previous" ]] && mv "$previous" "$installed"
+  fail "Couldn't move the new app into place; the previous copy was restored."
+fi
+rm -rf "$previous"
+
+echo "==> Making the installed copy the only registered widget"
+"$lsregister" -f "$installed" >/dev/null 2>&1 || true
+pluginkit -a "$installed/Contents/PlugIns/ClaudeUsageWidgetExtension.appex" 2>/dev/null || true
+# Other copies (Xcode builds, temporary build folders) stay registered until removed, and macOS may run their widget instead.
+other_copies=$({
+  pluginkit -m -A -D -v -i "$widget_id" 2>/dev/null |
+    awk -F'\t' '$NF ~ /^[[:space:]]*\// {sub(/^[[:space:]]+/, "", $NF); print $NF}'
+  "$lsregister" -dump 2>/dev/null | sed -nE 's/^path:[[:space:]]+(.*\/ClaudeUsageWidget\.app)( \(0x[0-9a-f]+\))?$/\1/p'
+} | sort -u)
+removed_other_copy=false
+while IFS= read -r path; do
+  [[ -z "$path" || "$path" == "$installed" || "$path" == "$installed"/* ]] && continue
+  echo "    Unregistering ${path/#$HOME/~}"
+  removed_other_copy=true
+  case "$path" in
+    *.appex) pluginkit -r "$path" 2>/dev/null || true ;;
+    *.app)
+      pluginkit -r "$path/Contents/PlugIns/ClaudeUsageWidgetExtension.appex" 2>/dev/null || true
+      "$lsregister" -u "$path" 2>/dev/null || true ;;
+  esac
+done <<< "$other_copies"
+# Stop any widget process that started from another copy while this ran; macOS relaunches it from the installed copy.
+pkill -x ClaudeUsageWidgetExtension 2>/dev/null || true
+if [[ "$removed_other_copy" == true ]]; then
+  # The widget host caches which copy it launched and keeps retrying a removed one. Restarting it clears that;
+  # macOS starts it again immediately, and every desktop widget redraws once.
+  echo "    Restarting the widget host so it forgets the removed copies"
+  killall chronod 2>/dev/null || true
+  sleep 2
+fi
+
+echo "==> Opening the app"
+open "$installed"
+echo "==> Installed version $version ($build_number). Look for its item in the menu bar."

@@ -26,10 +26,4 @@ final class UsageFormattingTests: XCTestCase {
         XCTAssertEqual(UsageFormatting.resetText(until: now.addingTimeInterval(86400), now: now), "1d 0h")
         XCTAssertEqual(UsageFormatting.resetText(until: now.addingTimeInterval(3 * 86400 + 4 * 3600 + 59 * 60), now: now), "3d 4h")
     }
-
-    func testMenuBarTitleShowsTheFiveHourPercent() {
-        XCTAssertEqual(UsageFormatting.menuBarTitle(for: UsageSnapshot(fiveHourPercent: 42.7, weeklyPercent: 7)), "42%")
-        XCTAssertEqual(UsageFormatting.menuBarTitle(for: UsageSnapshot(weeklyPercent: 7)), "—")
-        XCTAssertEqual(UsageFormatting.menuBarTitle(for: nil), "—")
-    }
 }

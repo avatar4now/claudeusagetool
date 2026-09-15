@@ -77,8 +77,13 @@ final class WidgetConfigTests: XCTestCase {
         XCTAssertEqual(WidgetConfig(sessionKey: "s", organizationId: upper).validatedOrganizationId, lower)
     }
 
+    func testValidatedKeepsTheCredentialGeneration() throws {
+        let config = WidgetConfig(sessionKey: "sk", organizationId: upper, generation: "gen-7")
+        XCTAssertEqual(try config.validated().generation, "gen-7")
+    }
+
     func testJSONRoundTrip() throws {
-        let original = WidgetConfig(oauthToken: "t", sessionKey: "s", organizationId: lower)
+        let original = WidgetConfig(oauthToken: "t", sessionKey: "s", organizationId: lower, generation: "g")
         XCTAssertEqual(try WidgetConfig.decode(try original.encoded()), original)
     }
 

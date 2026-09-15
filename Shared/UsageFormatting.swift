@@ -23,11 +23,6 @@ enum UsageFormatting {
         if hours > 0 { return "\(hours)h \(minutes)m" }
         return minutes > 0 ? "\(minutes)m" : "<1m"
     }
-
-    /// What the menu bar shows: the five-hour percent, or a dash until it's known.
-    static func menuBarTitle(for snapshot: UsageSnapshot?) -> String {
-        percentText(snapshot?.fiveHourPercent)
-    }
 }
 
 /// The one-line result shown in the settings window after Save or Test Connection.

@@ -5,11 +5,14 @@ struct WidgetConfig: Codable, Equatable, Sendable {
     var oauthToken: String?
     var sessionKey: String?
     var organizationId: String?
+    /// A random, non-secret ID that changes every time credentials are saved (see ConfigEditor).
+    var generation: String?
 
-    init(oauthToken: String? = nil, sessionKey: String? = nil, organizationId: String? = nil) {
+    init(oauthToken: String? = nil, sessionKey: String? = nil, organizationId: String? = nil, generation: String? = nil) {
         self.oauthToken = oauthToken
         self.sessionKey = sessionKey
         self.organizationId = organizationId
+        self.generation = generation
     }
 
     /// True when there is nothing to sign in with. An organization ID on its own is not a credential.
@@ -34,7 +37,8 @@ struct WidgetConfig: Codable, Equatable, Sendable {
         if let sessionKey, !Self.isSafeSessionKey(sessionKey) { throw ConfigValidationError.invalidSessionKey }
         if let organizationId, UUID(uuidString: organizationId) == nil { throw ConfigValidationError.invalidOrganizationId }
         if sessionKey != nil, organizationId == nil { throw ConfigValidationError.missingOrganizationId }
-        return WidgetConfig(oauthToken: oauthToken, sessionKey: sessionKey, organizationId: organizationId?.lowercased())
+        return WidgetConfig(oauthToken: oauthToken, sessionKey: sessionKey, organizationId: organizationId?.lowercased(),
+                            generation: generation)
     }
 
     /// A token must be visible ASCII only, so it can't split or extend the Authorization header.
@@ -54,7 +58,8 @@ struct WidgetConfig: Codable, Equatable, Sendable {
         let raw = try JSONDecoder().decode(WidgetConfig.self, from: data)
         return WidgetConfig(oauthToken: raw.oauthToken?.trimmedNonEmpty,
                             sessionKey: raw.sessionKey?.trimmedNonEmpty,
-                            organizationId: raw.organizationId?.trimmedNonEmpty)
+                            organizationId: raw.organizationId?.trimmedNonEmpty,
+                            generation: raw.generation?.trimmedNonEmpty)
     }
 }
 
