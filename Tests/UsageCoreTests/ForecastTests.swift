@@ -113,6 +113,17 @@ final class ForecastTests: XCTestCase {
                                                     samples: [], now: now, isStale: false)))
     }
 
+    func testNoUsageYetWhenNothingIsUsedAndThereIsNoResetTime() {
+        XCTAssertEqual(UsageForecast.make(.fiveHour, snapshot: UsageSnapshot(fiveHourPercent: 0), samples: [], now: now, isStale: false),
+                       .noUsageYet(resetsAt: nil), "between sessions the 5-hour limit is 0% with no reset time")
+        XCTAssertEqual(UsageForecast.make(.weekly, snapshot: UsageSnapshot(weeklyPercent: 0), samples: [], now: now, isStale: false),
+                       .noUsageYet(resetsAt: nil))
+        XCTAssertEqual(UsageForecast.make(.fiveHour, snapshot: UsageSnapshot(fiveHourPercent: 0), samples: [], now: now, isStale: true),
+                       .unavailable, "stale numbers still get no forecast")
+        XCTAssertEqual(UsageForecast.make(.fiveHour, snapshot: UsageSnapshot(fiveHourPercent: 1), samples: [], now: now, isStale: false),
+                       .unavailable, "some usage with no reset time still has nothing to forecast toward")
+    }
+
     // MARK: The five-hour session
 
     func testFiveHourUsesTheSessionSoFarAndShouldLast() throws {
@@ -337,10 +348,10 @@ final class ForecastTests: XCTestCase {
     func testBudgetInTheLastDayAndForSmallNumbers() {
         let lastDay = make(percent: 94.8, resetsAt: at(15, 6), projected: 99, dailyBudget: nil)
         XCTAssertEqual(ForecastRow.make(.forecast(lastDay), kind: .weekly, now: now, calendar: calendar, locale: locale).detail,
-                       "6 pts left for the last 14h", "points left match the rounded-down percent on the cards")
+                       "6 pts left for the next 14h", "points left match the rounded-down percent on the cards")
         let lastHalfHour = make(percent: 99.5, resetsAt: at(14, 16, 30), projected: 99.9, dailyBudget: nil)
         XCTAssertEqual(ForecastRow.make(.forecast(lastHalfHour), kind: .weekly, now: now, calendar: calendar, locale: locale).detail,
-                       "1 pt left for the last 30m")
+                       "1 pt left for the next 30m")
 
         let quiet = make(percent: 99, resetsAt: at(16, 16), pointsPerHour: 0, projected: 99, dailyBudget: 0.5, recentPointsPerDay: 0)
         XCTAssertEqual(ForecastRow.make(.forecast(quiet), kind: .weekly, now: now, calendar: calendar, locale: locale).detail,
@@ -366,11 +377,33 @@ final class ForecastTests: XCTestCase {
         XCTAssertEqual(unused.headline, "Nothing used yet in this window")
         XCTAssertEqual(plain(unused.detail), "Resets Thu 3:00 AM")
 
+        let idleSession = ForecastRow.make(.noUsageYet(resetsAt: nil), kind: .fiveHour, now: now, calendar: calendar, locale: locale)
+        XCTAssertEqual(idleSession.status, .noUsageYet)
+        XCTAssertEqual(idleSession.headline, "Nothing used yet · a session starts with your next message")
+        XCTAssertNil(idleSession.detail, "there is no reset time to show")
+        let idleWeek = ForecastRow.make(.noUsageYet(resetsAt: nil), kind: .weekly, now: now, calendar: calendar, locale: locale)
+        XCTAssertEqual(idleWeek.headline, "Nothing used yet in this window")
+        XCTAssertNil(idleWeek.detail)
+
         let unavailable = ForecastRow.make(.unavailable, kind: .weekly, now: now, calendar: calendar, locale: locale)
         XCTAssertEqual(unavailable.status, .unavailable)
         XCTAssertEqual(unavailable.headline, "Needs a current reading with a reset time")
         XCTAssertNil(unavailable.detail)
         XCTAssertNil(unavailable.basis)
+    }
+
+    func testATimeAboutAWeekAwayAlsoShowsTheDate() {
+        // Now is Monday 4:00 PM, so "Mon 3:00 AM" on its own would look like this morning.
+        let nextWeek = make(percent: 5, resetsAt: at(21, 3), basis: .windowSoFar, projected: 45)
+        XCTAssertEqual(plain(ForecastRow.make(.forecast(nextWeek), kind: .weekly, now: now, calendar: calendar, locale: locale).headline),
+                       "About 45% used when it resets Mon, Sep 21 at 3:00 AM")
+        let runsOut = make(percent: 5, resetsAt: at(21, 3), projected: 120, runsOutAt: at(21, 1))
+        XCTAssertEqual(plain(ForecastRow.make(.forecast(runsOut), kind: .weekly, now: now, calendar: calendar, locale: locale).headline),
+                       "Reaches 100% around Mon, Sep 21 at 1:00 AM, 2h before it resets")
+        let reached = ForecastRow.make(.limitReached(resetsAt: at(20, 3)), kind: .weekly, now: now, calendar: calendar, locale: locale)
+        XCTAssertEqual(plain(reached.detail), "Resets Sun, Sep 20 at 3:00 AM", "six days ahead also shows the date")
+        let sooner = ForecastRow.make(.limitReached(resetsAt: at(19, 23)), kind: .weekly, now: now, calendar: calendar, locale: locale)
+        XCTAssertEqual(plain(sooner.detail), "Resets Sat 11:00 PM", "within five days the weekday is enough")
     }
 
     func testAccessibilityLabelReadsAsOneSentence() {

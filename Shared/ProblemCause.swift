@@ -25,9 +25,12 @@ enum ProblemCause: String, Codable, Sendable, CaseIterable {
 
     init(_ error: UsageError) {
         switch error {
-        case .tokenRejected, .tokenCannotReadUsage, .sessionKeyRejected:
+        case .tokenRejected, .sessionKeyRejected:
             self = .signIn
         case .noCredentials, .invalidOrganizationId, .invalidCredentials:
+            self = .setup
+        case .tokenCannotReadUsage:
+            // The token works but can't read usage, so signing in again won't help. It needs a session key instead.
             self = .setup
         case .rateLimited:
             self = .rateLimited

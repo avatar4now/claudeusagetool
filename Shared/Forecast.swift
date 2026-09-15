@@ -41,9 +41,10 @@ enum ForecastOutcome: Equatable, Sendable {
     case forecast(LimitForecast)
     /// The limit is at 100%. The reset time is nil when the service didn't report a usable one.
     case limitReached(resetsAt: Date?)
-    case noUsageYet(resetsAt: Date)
+    /// Less than 1% used. The reset time is nil when no window has started yet, as between 5-hour sessions.
+    case noUsageYet(resetsAt: Date?)
     case tooEarly(resetsAt: Date)
-    /// No current reading with a reset time, stale numbers, or a reset time that has passed.
+    /// Stale numbers, a reset time that has passed, or some usage with no reset time.
     case unavailable
 }
 
@@ -66,6 +67,8 @@ enum UsageForecast {
         guard !ResetBoundary.isAwaitingReset(reported, now: now) else { return .unavailable }
         let resetsAt = reported.flatMap { $0.timeIntervalSince(now) <= kind.windowLength + 60 ? $0 : nil }
         if percent >= 100 { return .limitReached(resetsAt: resetsAt) }
+        // The service leaves out the reset time when no window has started, such as between 5-hour sessions.
+        if resetsAt == nil && percent < 1 { return .noUsageYet(resetsAt: nil) }
         guard let resetsAt else { return .unavailable }
 
         let remaining = resetsAt.timeIntervalSince(now)
@@ -209,10 +212,13 @@ struct ForecastRow: Equatable, Sendable {
                      calendar: Calendar = .current, locale: Locale = .current) -> ForecastRow {
         let status = ForecastStatus(outcome)
 
-        /// "9:40 PM" today, otherwise "Wed 9:40 PM".
+        /// "9:40 PM" today, "Wed 9:40 PM" within the next few days, or "Mon, Sep 21 at 9:40 PM" about a week away,
+        /// where the weekday alone could be mistaken for this week's.
         func moment(_ date: Date) -> String {
             var style = Date.FormatStyle(locale: locale, calendar: calendar, timeZone: calendar.timeZone).hour().minute()
             if !calendar.isDate(date, inSameDayAs: now) { style = style.weekday(.abbreviated) }
+            let days = calendar.dateComponents([.day], from: calendar.startOfDay(for: now), to: calendar.startOfDay(for: date)).day ?? 0
+            if abs(days) >= 6 { style = style.month(.abbreviated).day() }
             return date.formatted(style)
         }
         /// "at 9:40 PM" today, otherwise "Wed 9:40 PM".
@@ -239,21 +245,24 @@ struct ForecastRow: Equatable, Sendable {
             return ForecastRow(kind: kind, status: status, headline: "A forecast starts around \(moment(starts))",
                                detail: "Resets \(resetMoment(resetsAt))", basis: nil)
         case .noUsageYet(let resetsAt):
-            return ForecastRow(kind: kind, status: status, headline: "Nothing used yet in this window",
-                               detail: "Resets \(resetMoment(resetsAt))", basis: nil)
+            // With no reset time, the 5-hour window hasn't started yet.
+            let headline = resetsAt == nil && kind == .fiveHour
+                ? "Nothing used yet · a session starts with your next message" : "Nothing used yet in this window"
+            return ForecastRow(kind: kind, status: status, headline: headline,
+                               detail: resetsAt.map { "Resets \(resetMoment($0))" }, basis: nil)
         case .unavailable:
             return ForecastRow(kind: kind, status: status, headline: "Needs a current reading with a reset time",
                                detail: nil, basis: nil)
         }
     }
 
-    /// "Budget: about 3 pts a day for the next 2.2 days · lately about 12 pts a day", or "6 pts left for the last 14h".
+    /// "Budget: about 3 pts a day for the next 2.2 days · lately about 12 pts a day", or "6 pts left for the next 14h".
     private static func budgetLine(_ forecast: LimitForecast, now: Date) -> String? {
         guard forecast.kind != .fiveHour else { return nil }
         // Rounding up matches the rounded-down percentage on the limit cards: 94.8% shows as 94%, so 6 pts left.
         let left = Int(forecast.pointsLeft.rounded(.up))
         guard let budget = forecast.dailyBudget else {
-            return "\(pointsText(left)) left for the last \(shortDuration(until: forecast.resetsAt, from: now))"
+            return "\(pointsText(left)) left for the next \(shortDuration(until: forecast.resetsAt, from: now))"
         }
         let days = String(format: "%.1f", forecast.resetsAt.timeIntervalSince(now) / 86_400)
         var line = "Budget: \(perDayText(budget)) for the next \(days) days"

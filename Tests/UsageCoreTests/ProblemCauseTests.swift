@@ -21,8 +21,9 @@ final class ProblemCauseTests: XCTestCase {
 
     func testEachErrorMapsToItsCause() {
         let expected: [(UsageError, ProblemCause)] = [
-            (.tokenRejected, .signIn), (.tokenCannotReadUsage, .signIn), (.sessionKeyRejected, .signIn),
-            (.noCredentials, .setup), (.invalidOrganizationId, .setup), (.invalidCredentials, .setup),
+            (.tokenRejected, .signIn), (.sessionKeyRejected, .signIn),
+            // A token that works but can't read usage needs a different kind of credential, not a new sign-in.
+            (.tokenCannotReadUsage, .setup), (.noCredentials, .setup), (.invalidOrganizationId, .setup), (.invalidCredentials, .setup),
             (.rateLimited(retryAfter: 30), .rateLimited), (.network, .offline), (.blockedByCloudflare, .botCheck),
             (.accessDenied(401), .serviceError), (.http(502), .serviceError), (.invalidResponse, .serviceError),
             (.redirected, .serviceError), (.requestBlocked, .serviceError), (.keychain(-25293), .keychain)

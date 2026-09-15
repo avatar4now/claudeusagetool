@@ -48,8 +48,16 @@ build_commit=$(git rev-parse --short HEAD 2>/dev/null || true)
 build_branch=""
 if [[ -n "$build_commit" ]]; then
   build_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)
-  # Only changes to tracked files count, so untracked folders like claude/ don't mark every build as modified.
-  if [[ -n "$(git status --porcelain --untracked-files=no 2>/dev/null || true)" ]]; then
+  # A checked-out commit with no branch reports "HEAD". Leave the branch blank so it isn't mistaken for a branch name.
+  if [[ "$build_branch" == "HEAD" ]]; then
+    build_branch=""
+  fi
+  # Changes to tracked files count anywhere. Untracked files count only inside the folders Xcode builds,
+  # so claude/ doesn't mark every build as modified but a new, not-yet-added Swift file does.
+  dirty=$(git status --porcelain --untracked-files=no 2>/dev/null || true)
+  dirty+=$(git status --porcelain --untracked-files=all -- Shared ClaudeUsageWidget ClaudeUsageWidgetExtension \
+    "$project" 2>/dev/null || true)
+  if [[ -n "$dirty" ]]; then
     build_commit="$build_commit-modified"
   fi
 fi

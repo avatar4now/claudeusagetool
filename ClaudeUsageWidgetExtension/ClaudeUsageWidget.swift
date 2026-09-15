@@ -219,11 +219,17 @@ struct StatusLine: View {
 
     var body: some View {
         if let notice = entry.notice {
-            Label(notice, systemImage: entry.cause?.symbol ?? ProblemCause.fallbackSymbol)
-                .font(.system(size: size - 1))
-                .foregroundStyle(.orange)
-                .lineLimit(2)
-                .minimumScaleFactor(0.8)
+            // A smaller icon with a tight gap, so a two-line notice still fits in the small and medium widgets.
+            HStack(alignment: .firstTextBaseline, spacing: 3) {
+                Image(systemName: entry.cause?.symbol ?? ProblemCause.fallbackSymbol)
+                    .font(.system(size: size - 2))
+                    .accessibilityHidden(true)
+                Text(notice)
+                    .font(.system(size: size - 1))
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.7)
+            }
+            .foregroundStyle(.orange)
         } else if entry.isStale, let fetchedAt = entry.fetchedAt {
             Text("Data from \(fetchedAt.formatted(date: .omitted, time: .shortened))")
                 .font(.system(size: size, design: .monospaced))
