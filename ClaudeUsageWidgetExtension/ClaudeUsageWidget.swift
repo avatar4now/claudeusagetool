@@ -473,6 +473,7 @@ struct UsageRing: View {
                     .font(.system(size: 22, weight: .heavy, design: .rounded))
                     .foregroundStyle(display.color)
                     .minimumScaleFactor(0.7)
+                    .contentTransition(.numericText(value: Double(display.percent ?? 0)))
                 Text(display.percent == nil ? " " : "% \(display.appearance.numberCaption)")
                     .font(.system(size: 9, weight: .medium))
                     .foregroundStyle(.secondary)
@@ -573,6 +574,7 @@ struct UsageCard: View {
                 Text(display.percentText)
                     .font(.system(size: 18, weight: .heavy, design: .rounded))
                     .foregroundStyle(display.color)
+                    .contentTransition(.numericText(value: Double(display.percent ?? 0)))
             }
             UsageProgressBar(display: display, height: barHeight)
             let detail = [display.resetText, display.pace?.status.label].compactMap { $0 }.joined(separator: " · ")

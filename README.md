@@ -23,7 +23,7 @@ You build the app yourself on your Mac. It's free and takes a few minutes.
 **You need**
 
 - macOS 15 or later
-- Xcode 16 or later, free from the Mac App Store
+- Xcode 26 or later, free from the Mac App Store
 - A Claude plan with usage limits, such as Pro or Max
 
 **Steps**

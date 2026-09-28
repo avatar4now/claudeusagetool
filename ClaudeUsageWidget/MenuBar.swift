@@ -45,5 +45,6 @@ struct UsageMenu: View {
                 onQuit: { NSApplication.shared.terminate(nil) }
             )
         }
+        .enablesDashboardShortcut()
     }
 }

@@ -1,4 +1,5 @@
 import AppKit
+import KeyboardShortcuts
 import SwiftUI
 import WidgetKit
 import os
@@ -42,6 +43,7 @@ struct SettingsView: View {
         }
         .padding(.top, 6)
         .frame(minWidth: 640, minHeight: 640, idealHeight: 820)
+        .enablesDashboardShortcut()
         .onAppear {
             loadConfig()
             loginItem.refresh()
@@ -160,6 +162,17 @@ struct SettingsView: View {
                 }
                 Text("Applies to the menu bar and the widget.")
                     .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section {
+                LabeledContent("Show the dashboard") {
+                    KeyboardShortcuts.Recorder(for: .showDashboard)
+                }
+            } header: {
+                Text("Keyboard shortcut")
+            } footer: {
+                Text("Press it in any app to bring up the dashboard. Leave it empty for no shortcut.")
                     .foregroundStyle(.secondary)
             }
 

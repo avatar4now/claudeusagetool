@@ -219,6 +219,8 @@ struct MenuUsageRow: View {
                     .font(.system(.callout, design: .rounded).weight(.semibold))
                     .monospacedDigit()
                     .foregroundStyle(display.color)
+                    .contentTransition(.numericText(value: Double(display.percent ?? 0)))
+                    .animation(.snappy, value: display.percent)
             }
             UsageProgressBar(display: display, height: 6)
             if !detail.isEmpty {

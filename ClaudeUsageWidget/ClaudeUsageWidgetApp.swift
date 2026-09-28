@@ -10,6 +10,10 @@ struct ClaudeUsageWidgetApp: App {
     /// Watches GitHub for a newer version of this copy.
     @StateObject private var updates = UpdateChecker()
 
+    init() {
+        Hotkeys.shared.start()
+    }
+
     var body: some Scene {
         // The first window is the one macOS reopens when you open the app while it's already running.
         Window("Claude Usage", id: AppWindow.dashboard) {
@@ -49,6 +53,7 @@ struct ClaudeUsageWidgetApp: App {
                                                appearance: monitor.appearance)
                          },
                          now: monitor.clock)
+                .enablesDashboardShortcut()
         }
         .menuBarExtraStyle(.window)
     }

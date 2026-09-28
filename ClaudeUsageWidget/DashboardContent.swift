@@ -319,6 +319,8 @@ struct DashboardLimitCard: View {
                         .monospacedDigit()
                         .foregroundStyle(display.color)
                         .minimumScaleFactor(0.6)
+                        .contentTransition(.numericText(value: Double(display.percent ?? 0)))
+                        .animation(.snappy, value: display.percent)
                     Text(display.percent == nil ? " " : "% \(display.appearance.numberCaption)")
                         .font(.caption2)
                         .foregroundStyle(.secondary)

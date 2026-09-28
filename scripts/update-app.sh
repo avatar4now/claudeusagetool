@@ -121,6 +121,8 @@ trap cleanup EXIT
 build_log="$build_dir/build.log"
 if ! xcodebuild -project "$project" -scheme "$scheme" -configuration Release -destination 'platform=macOS' \
      -derivedDataPath "$build_dir/DerivedData" \
+     -clonedSourcePackagesDirPath "$HOME/Library/Caches/ClaudeUsageWidget/SourcePackages" \
+     -onlyUsePackageVersionsFromResolvedFile \
      DEVELOPMENT_TEAM="$expected_team" \
      CUW_BUILD_COMMIT="$build_commit" CUW_BUILD_BRANCH="$build_branch" CUW_BUILD_DATE="$build_date" \
      CUW_SOURCE_REPO="$source_repo" \

@@ -36,6 +36,7 @@ struct Dashboard: View {
         .task(id: monitor.historyRevision) {
             samples = monitor.history.load(now: Date())
         }
+        .enablesDashboardShortcut()
         .onAppear { WindowPresence.opened() }
         .onDisappear { WindowPresence.closed() }
     }

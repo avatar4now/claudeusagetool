@@ -32,6 +32,7 @@ struct SetupAssistant: View {
                          openWindow(id: AppWindow.dashboard)
                          dismissWindow(id: AppWindow.setup)
                      })
+            .enablesDashboardShortcut()
             .onAppear {
                 model.detectBrowser()
                 loginItem.refresh()
