@@ -18,6 +18,12 @@ struct UsageMenu: View {
                 refreshSeconds: monitor.refreshSeconds,
                 version: AppVersion.current.shortText,
                 now: context.date,
+                appearance: monitor.appearance,
+                needsSetup: !monitor.hasCredentials,
+                onSetUp: {
+                    openWindow(id: AppWindow.setup)
+                    NSApplication.shared.activate()
+                },
                 onChangeRefreshInterval: { monitor.setRefreshInterval($0) },
                 onRefresh: { Task { await monitor.refresh(trigger: .manual) } },
                 onOpenDashboard: {

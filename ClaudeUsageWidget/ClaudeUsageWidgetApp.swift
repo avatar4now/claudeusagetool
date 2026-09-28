@@ -15,14 +15,21 @@ struct ClaudeUsageWidgetApp: App {
         }
         .defaultSize(width: 940, height: 960)
         .windowResizability(.contentMinSize)
-        .defaultLaunchBehavior(AppLaunch.showsSettingsAtLaunch ? .suppressed : .presented)
+        .defaultLaunchBehavior(AppLaunch.needsSetup ? .suppressed : .presented)
         .restorationBehavior(.disabled)
 
         Window("Settings", id: AppWindow.settings) {
             SettingsView(monitor: monitor, loginItem: loginItem)
         }
         .windowResizability(.contentMinSize)
-        .defaultLaunchBehavior(AppLaunch.showsSettingsAtLaunch ? .presented : .suppressed)
+        .defaultLaunchBehavior(.suppressed)
+        .restorationBehavior(.disabled)
+
+        Window("Set Up Claude Usage", id: AppWindow.setup) {
+            SetupAssistant(monitor: monitor, loginItem: loginItem)
+        }
+        .windowResizability(.contentSize)
+        .defaultLaunchBehavior(AppLaunch.needsSetup ? .presented : .suppressed)
         .restorationBehavior(.disabled)
 
         MenuBarExtra {
@@ -30,9 +37,16 @@ struct ClaudeUsageWidgetApp: App {
         } label: {
             // monitor.clock ticks every 30 seconds, so staleness and reset state here stay current between fetches.
             let _ = monitor.clock
-            MenuBarLabel(headline: monitor.headline,
+            let headline = monitor.headline
+            MenuBarLabel(headline: headline,
                          isStale: monitor.isStale,
-                         problem: monitor.snapshot == nil ? monitor.error.map(ProblemCause.init) : nil)
+                         problem: monitor.snapshot == nil ? monitor.error.map { ProblemCause($0) } : nil,
+                         appearance: monitor.appearance,
+                         display: headline.limit.map {
+                             LimitDisplay.make($0, snapshot: monitor.snapshot, now: monitor.clock, isStale: monitor.isStale,
+                                               appearance: monitor.appearance)
+                         },
+                         now: monitor.clock)
         }
         .menuBarExtraStyle(.window)
     }

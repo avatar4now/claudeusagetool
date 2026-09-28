@@ -21,178 +21,26 @@ struct SettingsView: View {
 
     private static let organizationsURL = URL(string: "https://claude.ai/api/organizations")!
 
+    @AppStorage(SettingsTab.storageKey) private var tab = SettingsTab.account.rawValue
+    @Environment(\.openWindow) private var openWindow
+
     var body: some View {
-        ScrollView {
-        VStack(spacing: 18) {
-            // Header
-            HStack(spacing: 10) {
-                Image(systemName: "chart.bar.fill")
-                    .font(.title)
-                    .foregroundStyle(.purple)
-                VStack(alignment: .leading) {
-                    Text("Claude Usage Widget")
-                        .font(.title2.bold())
-                    Text("Settings")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-            }
-
-            Divider()
-
-            GroupBox("Session Key (recommended)") {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("On claude.ai, open your browser's Developer Tools, go to Application → Cookies, and copy the sessionKey value.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    SecureField("Session Key (sk-ant-sid01-...)", text: $sessionKey)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(size: 12, design: .monospaced))
-                    HStack(spacing: 4) {
-                        Text("Organization ID: copy the \"uuid\" shown at")
-                            .foregroundStyle(.secondary)
-                        Link("claude.ai/api/organizations", destination: Self.organizationsURL)
-                    }
-                    .font(.caption)
-                    TextField("Organization ID (uuid)", text: $organizationId)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(size: 12, design: .monospaced))
-                }
-                .padding(8)
-            }
-
-            GroupBox("OAuth Token (optional)") {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Tokens from claude setup-token can't read usage, so leave this blank unless you have a token that can.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    SecureField("OAuth Bearer Token", text: $oauthToken)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(size: 12, design: .monospaced))
-                }
-                .padding(8)
-            }
-
-            GroupBox("Display and startup") {
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack(spacing: 8) {
-                        Text("Menu bar shows")
-                            .frame(width: 140, alignment: .leading)
-                        Picker("Menu bar shows", selection: Binding(get: { monitor.menuBarMetric },
-                                                                    set: { monitor.setMenuBarMetric($0) })) {
-                            ForEach(MenuBarMetric.allCases, id: \.self) { metric in
-                                Text(metric.title).tag(metric)
-                            }
-                        }
-                        .labelsHidden()
-                        .pickerStyle(.menu)
-                        .fixedSize()
-                        Spacer()
-                    }
-                    HStack(spacing: 8) {
-                        Text("Refresh usage every")
-                            .frame(width: 140, alignment: .leading)
-                        Picker("Refresh every", selection: Binding(get: { monitor.refreshSeconds },
-                                                                   set: { monitor.setRefreshInterval($0) })) {
-                            ForEach(RefreshSchedule.choices, id: \.self) { seconds in
-                                Text(RefreshSchedule.label(for: seconds)).tag(seconds)
-                            }
-                        }
-                        .labelsHidden()
-                        .pickerStyle(.menu)
-                        .fixedSize()
-                        Text("Applies to the menu bar and the widget.")
-                            .foregroundStyle(.secondary)
-                        Spacer()
-                    }
-                    Toggle("Open at login", isOn: Binding(get: { loginItem.state == .on || loginItem.state == .needsApproval },
-                                                          set: { loginItem.setEnabled($0) }))
-                        .disabled(!loginItem.isInstalledCopy)
-                    loginStatus
-                }
-                .font(.callout)
-                .padding(8)
-            }
-
-            GroupBox("Usage history") {
-                VStack(alignment: .leading, spacing: 8) {
-                    Toggle("Keep a history of readings for the dashboard", isOn: Binding(get: { monitor.isHistoryEnabled },
-                                                                                       set: { monitor.setHistoryEnabled($0) }))
-                    Text("Percentages and reset times only, saved on this Mac for 90 days. Nothing is sent anywhere.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    HStack {
-                        Text(historySummary)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Spacer()
-                        Button("Clear History…") { confirmingClearHistory = true }
-                            .controlSize(.small)
-                    }
-                }
-                .font(.callout)
-                .padding(8)
-            }
-            .confirmationDialog("Clear all saved usage history?", isPresented: $confirmingClearHistory) {
-                Button("Clear History", role: .destructive) {
-                    monitor.clearHistory()
-                    updateHistorySummary()
-                }
-            } message: {
-                Text("The dashboard's charts start again from the next reading. This can't be undone.")
-            }
-
-            // Status
-            if !statusMessage.isEmpty {
-                HStack(spacing: 6) {
-                    if isChecking {
-                        ProgressView()
-                            .controlSize(.small)
-                    }
-                    Text(statusMessage)
-                        .font(.caption)
-                        .foregroundStyle(isChecking ? Color.secondary : (isSuccess ? Color.green : Color.red))
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                .padding(.horizontal)
-            }
-
-            HStack {
-                Button("Save Configuration") {
-                    saveConfig()
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(isChecking)
-
-                Button("Test Connection") {
-                    Task { await checkConnection(afterSave: false) }
-                }
-                .buttonStyle(.bordered)
-                .disabled(isChecking)
-            }
-
-            about
-
-            Spacer()
-
-            HStack(alignment: .bottom) {
-                Text("Stored in your login keychain. Only this app and its widget can read it.")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.tertiary)
-                Spacer()
-                Button("Quit Claude Usage Widget") {
-                    NSApplication.shared.terminate(nil)
-                }
-                .controlSize(.small)
-            }
+        TabView(selection: $tab) {
+            accountTab
+                .tabItem { Label("Account", systemImage: "person.crop.circle") }
+                .tag(SettingsTab.account.rawValue)
+            AppearanceSettings(monitor: monitor)
+                .tabItem { Label("Appearance", systemImage: "paintpalette") }
+                .tag(SettingsTab.appearance.rawValue)
+            generalTab
+                .tabItem { Label("General", systemImage: "gearshape") }
+                .tag(SettingsTab.general.rawValue)
+            aboutTab
+                .tabItem { Label("About", systemImage: "info.circle") }
+                .tag(SettingsTab.about.rawValue)
         }
-        .padding(24)
-        }
-        .frame(minWidth: 580, minHeight: 640, idealHeight: 860)
+        .padding(.top, 6)
+        .frame(minWidth: 640, minHeight: 640, idealHeight: 820)
         .onAppear {
             loadConfig()
             loginItem.refresh()
@@ -205,6 +53,158 @@ struct SettingsView: View {
         .onChange(of: monitor.historyRevision) { updateHistorySummary() }
     }
 
+    // MARK: Account
+
+    private var accountTab: some View {
+        ScrollView {
+            VStack(spacing: 18) {
+                HStack(spacing: 12) {
+                    Image(systemName: "wand.and.stars")
+                        .font(.title2)
+                        .foregroundStyle(.tint)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Setting up or switching accounts?")
+                            .font(.headline)
+                        Text("The setup assistant walks you through it and finds your organization for you.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Set Up Assistant…") { openWindow(id: AppWindow.setup) }
+                }
+                .padding(12)
+                .background(RoundedRectangle(cornerRadius: 10).fill(Color.primary.opacity(0.04)))
+
+                GroupBox("Session Key (recommended)") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("On claude.ai, open your browser's Developer Tools, go to Application → Cookies, and copy the sessionKey value.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        SecureField("Session Key (sk-ant-sid01-...)", text: $sessionKey)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(size: 12, design: .monospaced))
+                        HStack(spacing: 4) {
+                            Text("Organization ID: copy the \"uuid\" shown at")
+                                .foregroundStyle(.secondary)
+                            Link("claude.ai/api/organizations", destination: Self.organizationsURL)
+                        }
+                        .font(.caption)
+                        TextField("Organization ID (uuid)", text: $organizationId)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(size: 12, design: .monospaced))
+                    }
+                    .padding(8)
+                }
+
+                GroupBox("OAuth Token (optional)") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Tokens from claude setup-token can't read usage, so leave this blank unless you have a token that can.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        SecureField("OAuth Bearer Token", text: $oauthToken)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(size: 12, design: .monospaced))
+                    }
+                    .padding(8)
+                }
+
+                if !statusMessage.isEmpty {
+                    HStack(spacing: 6) {
+                        if isChecking {
+                            ProgressView()
+                                .controlSize(.small)
+                        }
+                        Text(statusMessage)
+                            .font(.caption)
+                            .foregroundStyle(isChecking ? Color.secondary : (isSuccess ? Color.green : Color.red))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(.horizontal)
+                }
+
+                HStack {
+                    Button("Save Configuration") {
+                        saveConfig()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(isChecking)
+
+                    Button("Test Connection") {
+                        Task { await checkConnection(afterSave: false) }
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(isChecking)
+                }
+
+                Text("Stored in your login keychain. Only this app and its widget can read it.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(24)
+        }
+    }
+
+    // MARK: General
+
+    private var generalTab: some View {
+        Form {
+            Section("Refresh") {
+                Picker("Refresh usage every", selection: Binding(get: { monitor.refreshSeconds },
+                                                                 set: { monitor.setRefreshInterval($0) })) {
+                    ForEach(RefreshSchedule.choices, id: \.self) { seconds in
+                        Text(RefreshSchedule.label(for: seconds)).tag(seconds)
+                    }
+                }
+                Text("Applies to the menu bar and the widget.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Startup") {
+                Toggle("Open at login", isOn: Binding(get: { loginItem.state == .on || loginItem.state == .needsApproval },
+                                                      set: { loginItem.setEnabled($0) }))
+                    .disabled(!loginItem.isInstalledCopy)
+                loginStatus
+            }
+
+            Section("Usage history") {
+                Toggle("Keep a history of readings for the dashboard", isOn: Binding(get: { monitor.isHistoryEnabled },
+                                                                                   set: { monitor.setHistoryEnabled($0) }))
+                Text("Percentages and reset times only, saved on this Mac for 90 days. Nothing is sent anywhere.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack {
+                    Text(historySummary)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Clear History…") { confirmingClearHistory = true }
+                }
+            }
+
+            Section {
+                HStack {
+                    Spacer()
+                    Button("Quit Claude Usage Widget") {
+                        NSApplication.shared.terminate(nil)
+                    }
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .confirmationDialog("Clear all saved usage history?", isPresented: $confirmingClearHistory) {
+            Button("Clear History", role: .destructive) {
+                monitor.clearHistory()
+                updateHistorySummary()
+            }
+        } message: {
+            Text("The dashboard's charts start again from the next reading. This can't be undone.")
+        }
+    }
+
     private func updateHistorySummary() {
         let samples = monitor.history.load(now: Date())
         if let first = samples.first {
@@ -214,49 +214,39 @@ struct SettingsView: View {
         }
     }
 
+    // MARK: About
+
     /// Which version is running and which code it was built from.
-    private var about: some View {
+    private var aboutTab: some View {
         let build = AppVersion.current
-        return GroupBox("About") {
-            VStack(alignment: .leading, spacing: 6) {
-                aboutRow("Version") {
-                    Text("\(build.version) (\(build.build))")
-                }
-                aboutRow("Built") {
-                    Text(build.builtText())
-                }
-                aboutRow("Commit") {
+        return Form {
+            Section {
+                LabeledContent("Version", value: "\(build.version) (\(build.build))")
+                LabeledContent("Built", value: build.builtText())
+                LabeledContent("Commit") {
                     if let commit = build.displayCommit {
-                        Text(commit)
-                            .font(.system(.callout, design: .monospaced))
-                            .textSelection(.enabled)
-                        if build.isModified {
-                            Text("includes uncommitted changes")
-                                .foregroundStyle(.secondary)
+                        HStack(spacing: 6) {
+                            Text(commit)
+                                .font(.system(.callout, design: .monospaced))
+                                .textSelection(.enabled)
+                            if build.isModified {
+                                Text("includes uncommitted changes")
+                                    .foregroundStyle(.secondary)
+                            }
                         }
                     } else {
-                        Text("—")
-                            .foregroundStyle(.secondary)
+                        Text("—").foregroundStyle(.secondary)
                     }
                 }
-                aboutRow("Branch") {
-                    Text(build.branch ?? "—")
-                        .foregroundStyle(build.branch == nil ? .secondary : .primary)
-                }
+                LabeledContent("Branch", value: build.branch ?? "—")
+            } header: {
+                Text("Claude Usage Widget")
+            } footer: {
+                Text("Your usage history and settings stay on this Mac. Your session key is kept in your login keychain and sent only to claude.ai.")
+                    .foregroundStyle(.secondary)
             }
-            .font(.callout)
-            .padding(8)
         }
-    }
-
-    /// One line of the About box: a label in the same column as the pickers above, then its value.
-    private func aboutRow<Value: View>(_ label: String, @ViewBuilder value: () -> Value) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Text(label)
-                .frame(width: 140, alignment: .leading)
-            value()
-            Spacer()
-        }
+        .formStyle(.grouped)
     }
 
     @ViewBuilder

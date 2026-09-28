@@ -25,13 +25,7 @@ enum HistoryRange: String, CaseIterable, Identifiable {
     }
 }
 
-enum DashboardPalette {
-    static let allModels = Color(red: 0.36, green: 0.56, blue: 0.96)
-    static let fable = Color(red: 0.96, green: 0.55, blue: 0.24)
-    static let fiveHour = Color(red: 0.30, green: 0.75, blue: 0.62)
-}
-
-/// The app's main window: current limits, then charts built from the saved history.
+/// The app's main window: current limits, a forecast, then charts built from the saved history.
 struct DashboardContent: View {
     let snapshot: UsageSnapshot?
     let lastSuccessAt: Date?
@@ -44,17 +38,17 @@ struct DashboardContent: View {
     let now: Date
     var calendar: Calendar = .current
     @Binding var range: HistoryRange
+    var appearance: Appearance = .standard
     var onRefresh: () -> Void = {}
     var onOpenSettings: () -> Void = {}
+    var onCustomize: () -> Void = {}
     /// Off only for image previews, which can't draw scroll views.
     var scrolls = true
 
+    private var palette: Palette { appearance.palette }
+
     private var isStale: Bool {
         snapshot != nil && Freshness.isStale(fetchedAt: lastSuccessAt, refreshSeconds: refreshSeconds, now: now)
-    }
-
-    private var days: [DailyUsage] {
-        UsageHistoryAnalysis.daily(samples, days: range.days, endingOn: now, calendar: calendar)
     }
 
     private var hasFable: Bool {
@@ -66,13 +60,6 @@ struct DashboardContent: View {
         LimitKind.allCases.filter { $0 != .fableWeekly || snapshot?.fableWeeklyPercent != nil }
     }
 
-    /// Where each visible limit is heading, from the same numbers the limit cards use.
-    private var forecasts: [LimitKind: ForecastOutcome] {
-        Dictionary(uniqueKeysWithValues: visibleLimits.map {
-            ($0, UsageForecast.make($0, snapshot: snapshot, samples: samples, now: now, isStale: isStale))
-        })
-    }
-
     var body: some View {
         if scrolls {
             ScrollView { page }
@@ -82,25 +69,42 @@ struct DashboardContent: View {
     }
 
     private var page: some View {
-        // Worked out once per redraw and shared by the forecast card and the week chart.
-        let outcomes = forecasts
+        // Worked out once per redraw and shared by the cards and charts below.
+        let displays = Dictionary(uniqueKeysWithValues: visibleLimits.map {
+            ($0, LimitDisplay.make($0, snapshot: snapshot, now: now, isStale: isStale, appearance: appearance, calendar: calendar))
+        })
+        let outcomes = Dictionary(uniqueKeysWithValues: visibleLimits.map {
+            ($0, UsageForecast.make($0, snapshot: snapshot, samples: samples, now: now, isStale: isStale))
+        })
+        let days = UsageHistoryAnalysis.daily(samples, days: range.days, endingOn: now, calendar: calendar)
         return VStack(alignment: .leading, spacing: 18) {
             header
-            currentLimits
+            problems
+            HStack(alignment: .top, spacing: 14) {
+                ForEach(visibleLimits, id: \.self) { kind in
+                    if let display = displays[kind] {
+                        DashboardLimitCard(display: display, dimmed: isStale,
+                                           trend: UsageHistoryAnalysis.currentWindow(samples, kind: kind,
+                                                                                     resetsAt: snapshot?.resetsAt(for: kind), now: now),
+                                           seriesColor: palette.series(for: kind).color)
+                    }
+                }
+            }
             ForecastCard(rows: visibleLimits.map { kind in
                 ForecastRow.make(outcomes[kind] ?? .unavailable, kind: kind, now: now, calendar: calendar)
-            })
-            dailyCard
+            }, palette: palette)
+            dailyCard(days: days)
             HStack(alignment: .top, spacing: 18) {
                 thisWeekCard(forecasts: outcomes)
                 fiveHourCard
             }
+            rhythmCard
             footer
         }
         .padding(24)
     }
 
-    // MARK: Header and current limits
+    // MARK: Header and problems
 
     private var header: some View {
         HStack(alignment: .firstTextBaseline, spacing: 12) {
@@ -113,6 +117,8 @@ struct DashboardContent: View {
                     .foregroundStyle(isStale ? Color.orange : Color.secondary)
             }
             Spacer()
+            Button(action: onCustomize) { Label("Customize", systemImage: "paintpalette") }
+                .help("Change colors, numbers, the menu bar, and charts")
             Button(action: onRefresh) { Label("Refresh", systemImage: "arrow.clockwise") }
                 .disabled(isRefreshing)
                 .keyboardShortcut("r")
@@ -122,7 +128,7 @@ struct DashboardContent: View {
     }
 
     @ViewBuilder
-    private var currentLimits: some View {
+    private var problems: some View {
         if let cooldown, cooldown.until > now {
             Label("Rate limited. Next try at \(cooldown.until.formatted(date: .omitted, time: .shortened)).", systemImage: "hourglass")
                 .foregroundStyle(.orange)
@@ -131,25 +137,15 @@ struct DashboardContent: View {
             Label(error.message, systemImage: ProblemCause(error).symbol)
                 .foregroundStyle(.orange)
         }
-        HStack(spacing: 14) {
-            ForEach(visibleLimits, id: \.self) { kind in
-                DashboardLimitCard(display: LimitDisplay.make(kind, snapshot: snapshot, now: now, isStale: isStale), dimmed: isStale)
-            }
-        }
     }
 
     // MARK: Used per day
 
-    private var dailyCard: some View {
+    private func dailyCard(days: [DailyUsage]) -> some View {
         DashboardCard {
             HStack(alignment: .firstTextBaseline) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Weekly limit used per day")
-                        .font(.headline)
-                    Text("Percentage points of your weekly limits used each day")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+                CardTitle("Weekly limit used per day", systemImage: "chart.bar.fill",
+                          caption: "Percentage points of your weekly limits used each day. Hover for details.")
                 Spacer()
                 Picker("Range", selection: $range) {
                     ForEach(HistoryRange.allCases) { Text($0.title).tag($0) }
@@ -163,8 +159,9 @@ struct DashboardContent: View {
                 EmptyHistory(isHistoryEnabled: isHistoryEnabled)
                     .frame(height: 220)
             } else {
-                DailyUsageChart(days: days, showFable: hasFable, calendar: calendar)
-                    .frame(height: 220)
+                DailyUsageChart(days: days, showFable: hasFable, calendar: calendar, palette: palette,
+                                resets: UsageHistoryAnalysis.weeklyResets(samples, from: days.first?.day ?? now, to: now))
+                    .frame(height: 230)
                 DailyStats(days: days, showFable: hasFable, firstReading: samples.first?.at, rangeStart: days.first?.day)
             }
         }
@@ -174,43 +171,55 @@ struct DashboardContent: View {
 
     private func thisWeekCard(forecasts: [LimitKind: ForecastOutcome]) -> some View {
         DashboardCard {
-            Text("This week")
-                .font(.headline)
             if let week = UsageHistoryAnalysis.currentWeek(samples, now: now), !week.points.isEmpty {
-                Text("Resets \(week.end.formatted(.dateTime.weekday(.abbreviated).hour().minute()))")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                WeekChart(week: week, showFable: hasFable, now: now,
+                CardTitle("This week", systemImage: "calendar",
+                          caption: "Resets \(week.end.formatted(.dateTime.weekday(.abbreviated).hour().minute()))")
+                WeekChart(week: week, showFable: hasFable, now: now, appearance: appearance,
                           weeklyProjection: projection(forecasts[.weekly], within: week),
                           fableProjection: projection(forecasts[.fableWeekly], within: week))
-                    .frame(height: 200)
+                    .frame(height: 210)
             } else {
+                CardTitle("This week", systemImage: "calendar", caption: nil)
                 EmptyHistory(isHistoryEnabled: isHistoryEnabled)
-                    .frame(height: 200)
+                    .frame(height: 210)
             }
         }
     }
 
-    /// The dashed forecast line for one limit, or nothing when there is no forecast.
+    /// The dashed forecast line for one limit, or nothing when there is no forecast or forecast lines are off.
     private func projection(_ outcome: ForecastOutcome?, within week: WeekSeries) -> [SeriesPoint] {
-        guard case .forecast(let forecast) = outcome else { return [] }
+        guard appearance.showForecastLines, case .forecast(let forecast) = outcome else { return [] }
         return forecast.projection(now: now, within: week)
     }
 
     private var fiveHourCard: some View {
         DashboardCard {
-            Text("5-hour session · last 24 hours")
-                .font(.headline)
             let series = UsageHistoryAnalysis.recentFiveHour(samples, now: now)
             if series.isEmpty {
+                CardTitle("5-hour session · last 24 hours", systemImage: "timer", caption: nil)
                 EmptyHistory(isHistoryEnabled: isHistoryEnabled)
-                    .frame(height: 200)
+                    .frame(height: 210)
             } else {
-                Text("Peak \(Int((series.map(\.value).max() ?? 0).rounded(.down)))%")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                FiveHourChart(series: series, now: now)
-                    .frame(height: 200)
+                CardTitle("5-hour session · last 24 hours", systemImage: "timer",
+                          caption: "Peak \(Int((series.map(\.value).max() ?? 0).rounded(.down)))%")
+                FiveHourChart(series: series, now: now, appearance: appearance)
+                    .frame(height: 210)
+            }
+        }
+    }
+
+    // MARK: When you use Claude
+
+    private var rhythmCard: some View {
+        let cells = UsageHistoryAnalysis.hourlyRhythm(samples, days: range.days, endingOn: now, calendar: calendar)
+        return DashboardCard {
+            CardTitle("When you use Claude", systemImage: "square.grid.3x3.fill",
+                      caption: "Weekly limit points used in each hour, over the last \(range.title). Hover for details.")
+            if cells.allSatisfy({ $0.points == 0 }) {
+                EmptyHistory(isHistoryEnabled: isHistoryEnabled)
+                    .frame(height: 190)
+            } else {
+                RhythmChart(cells: cells, calendar: calendar, color: palette.allModels.color)
             }
         }
     }
@@ -235,68 +244,159 @@ struct DashboardCard<Content: View>: View {
     @ViewBuilder var content: Content
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 12) {
             content
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 12).fill(Color.primary.opacity(0.05)))
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color.primary.opacity(0.045))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.06))
+        )
     }
 }
 
-struct DashboardLimitCard: View {
-    let display: LimitDisplay
-    let dimmed: Bool
+/// A card's title with a small symbol, and an optional caption underneath.
+struct CardTitle: View {
+    let title: String
+    let systemImage: String
+    let caption: String?
 
-    private var detail: String {
-        [display.resetText, display.pace?.status.label].compactMap { $0 }.joined(separator: " · ")
+    init(_ title: String, systemImage: String, caption: String?) {
+        self.title = title
+        self.systemImage = systemImage
+        self.caption = caption
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(display.kind.title)
-                    .font(.subheadline.weight(.semibold))
+        VStack(alignment: .leading, spacing: 2) {
+            Label(title, systemImage: systemImage)
+                .font(.headline)
+                .labelStyle(TitleWithTintedIcon())
+            if let caption {
+                Text(caption)
+                    .font(.caption)
                     .foregroundStyle(.secondary)
-                Spacer()
-                Text(display.percentText)
-                    .font(.system(size: 28, weight: .heavy, design: .rounded))
-                    .monospacedDigit()
-                    .foregroundStyle(display.color)
             }
-            UsageProgressBar(utilization: display.percent ?? 0, height: 10,
-                             paceFraction: display.pace?.elapsedFraction, isUnknown: display.percent == nil)
-            Text(detail.isEmpty ? " " : detail)
-                .font(.caption)
+        }
+    }
+}
+
+private struct TitleWithTintedIcon: LabelStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        HStack(spacing: 6) {
+            configuration.icon
                 .foregroundStyle(.secondary)
-                .lineLimit(1)
+                .imageScale(.small)
+            configuration.title
+        }
+    }
+}
+
+/// One current limit: a ring with the number inside, when it resets, the pace, and a trend line for this window.
+struct DashboardLimitCard: View {
+    let display: LimitDisplay
+    let dimmed: Bool
+    var trend: [SeriesPoint] = []
+    /// The limit's color in the charts below, shown as a small dot so the two are easy to match.
+    var seriesColor: Color = .secondary
+
+    private var windowStart: Date? {
+        display.resetsAt.map { $0.addingTimeInterval(-display.kind.windowLength) }
+    }
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 14) {
+            ZStack {
+                UsageRingTrack(display: display, lineWidth: 9)
+                VStack(spacing: -1) {
+                    Text(display.numberText)
+                        .font(.system(size: 26, weight: .heavy, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundStyle(display.color)
+                        .minimumScaleFactor(0.6)
+                    Text(display.percent == nil ? " " : "% \(display.appearance.numberCaption)")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 10)
+            }
+            .frame(width: 88, height: 88)
+
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(seriesColor)
+                        .frame(width: 7, height: 7)
+                    Text(display.kind.title)
+                        .font(.subheadline.weight(.semibold))
+                        .lineLimit(1)
+                }
+                Text(display.resetText ?? " ")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.85)
+                Text(display.pace?.status.label ?? " ")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                if let windowStart, let end = display.resetsAt, trend.count > 1 {
+                    Sparkline(points: trend, start: windowStart, end: end, color: display.color,
+                              showsLeft: display.appearance.numbers == .left, shaded: display.appearance.shadeCharts)
+                        .frame(height: 26)
+                        .padding(.top, 2)
+                } else {
+                    Spacer(minLength: 0)
+                        .frame(height: 28)
+                }
+            }
         }
         .padding(14)
-        .frame(maxWidth: .infinity)
-        .background(RoundedRectangle(cornerRadius: 12).fill(Color.primary.opacity(0.05)))
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color.primary.opacity(0.045))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.06))
+        )
         .opacity(dimmed || display.awaitingReset ? 0.6 : 1)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(display.kind.title), \(display.percent.map { "\($0) percent used" } ?? "not reported")"
-                            + (detail.isEmpty ? "" : ", \(detail)"))
+        .accessibilityLabel(accessibilityText)
+    }
+
+    private var accessibilityText: String {
+        var parts = [display.kind.title]
+        if display.percent == nil {
+            parts.append("not reported")
+        } else {
+            parts.append(display.percentText.replacingOccurrences(of: "%", with: " percent")
+                         + (display.appearance.numbers == .used ? " used" : ""))
+        }
+        if let reset = display.resetText { parts.append(reset) }
+        if let pace = display.pace { parts.append(pace.status.label) }
+        return parts.joined(separator: ", ")
     }
 }
 
 /// "If you keep using Claude at the same pace": one row per limit with a status chip, when it runs out, and a budget.
 struct ForecastCard: View {
     let rows: [ForecastRow]
+    var palette: Palette = ColorTheme.classic.palette
 
     var body: some View {
         DashboardCard {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Forecast")
-                    .font(.headline)
-                Text("If you keep using Claude at the same pace")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
+            CardTitle("Forecast", systemImage: "chart.line.uptrend.xyaxis",
+                      caption: "If you keep using Claude at the same pace")
             ForEach(Array(rows.enumerated()), id: \.element.kind) { index, row in
                 if index > 0 { Divider() }
-                ForecastRowView(row: row)
+                ForecastRowView(row: row, palette: palette)
             }
         }
     }
@@ -304,6 +404,7 @@ struct ForecastCard: View {
 
 struct ForecastRowView: View {
     let row: ForecastRow
+    var palette: Palette = ColorTheme.classic.palette
 
     var body: some View {
         HStack(alignment: .top, spacing: 20) {
@@ -311,7 +412,7 @@ struct ForecastRowView: View {
                 Text(row.kind.title)
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.secondary)
-                ForecastChip(status: row.status)
+                ForecastChip(status: row.status, palette: palette)
             }
             .frame(width: 180, alignment: .leading)
             VStack(alignment: .leading, spacing: 3) {
@@ -335,15 +436,17 @@ struct ForecastRowView: View {
     }
 }
 
-/// A small colored label: red when the limit runs out or is used up, orange when close, green when it should last.
+/// A small colored label in the theme's colors: alert when the limit runs out or is used up, caution when close,
+/// calm when it should last.
 struct ForecastChip: View {
     let status: ForecastStatus
+    var palette: Palette = ColorTheme.classic.palette
 
     private var color: Color {
         switch status {
-        case .runsOut, .limitReached: return .red
-        case .cuttingItClose: return .orange
-        case .shouldLast: return .green
+        case .runsOut, .limitReached: return palette.alert.color
+        case .cuttingItClose: return palette.caution.color
+        case .shouldLast: return palette.calm.color
         case .tooEarly, .noUsageYet, .unavailable: return .secondary
         }
     }
@@ -368,7 +471,7 @@ struct EmptyHistory: View {
             Image(systemName: "chart.bar.xaxis")
                 .font(.title)
                 .foregroundStyle(.tertiary)
-            Text(isHistoryEnabled ? "History starts with the next reading." : "Usage history is turned off in Settings.")
+            Text(isHistoryEnabled ? "This fills in as readings come in." : "Usage history is turned off in Settings.")
                 .foregroundStyle(.secondary)
             if isHistoryEnabled {
                 Text("The app saves a reading every few minutes while it runs.")
@@ -377,48 +480,6 @@ struct EmptyHistory: View {
             }
         }
         .frame(maxWidth: .infinity)
-    }
-}
-
-struct DailyUsageChart: View {
-    let days: [DailyUsage]
-    let showFable: Bool
-    let calendar: Calendar
-
-    private var labelStride: Int { days.count > 30 ? 14 : (days.count > 14 ? 5 : 2) }
-
-    var body: some View {
-        Chart {
-            ForEach(days) { day in
-                BarMark(x: .value("Day", day.day, unit: .day), y: .value("Points", day.weeklyPoints))
-                    .foregroundStyle(by: .value("Limit", "All models"))
-                    .position(by: .value("Limit", "All models"))
-                if showFable {
-                    BarMark(x: .value("Day", day.day, unit: .day), y: .value("Points", day.fablePoints))
-                        .foregroundStyle(by: .value("Limit", "Fable"))
-                        .position(by: .value("Limit", "Fable"))
-                }
-            }
-        }
-        .chartForegroundStyleScale(showFable
-            ? ["All models": DashboardPalette.allModels, "Fable": DashboardPalette.fable]
-            : ["All models": DashboardPalette.allModels])
-        .chartLegend(position: .top, alignment: .leading)
-        .chartYAxis {
-            AxisMarks(position: .leading) { value in
-                AxisGridLine()
-                AxisValueLabel {
-                    if let points = value.as(Double.self) { Text("\(Int(points))") }
-                }
-            }
-        }
-        .chartXAxis {
-            AxisMarks(values: .stride(by: .day, count: labelStride)) { _ in
-                AxisGridLine()
-                AxisValueLabel(format: .dateTime.month(.abbreviated).day())
-            }
-        }
-        .accessibilityLabel("Weekly limit percentage points used per day")
     }
 }
 
@@ -465,132 +526,5 @@ struct Stat: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
-    }
-}
-
-struct WeekChart: View {
-    let week: WeekSeries
-    let showFable: Bool
-    let now: Date
-    /// Dashed lines from now to where each limit is heading, already clipped to the week.
-    var weeklyProjection: [SeriesPoint] = []
-    var fableProjection: [SeriesPoint] = []
-
-    private var hasProjection: Bool {
-        !weeklyProjection.isEmpty || (showFable && !fableProjection.isEmpty)
-    }
-
-    var body: some View {
-        Chart {
-            LineMark(x: .value("Time", week.start), y: .value("Percent", 0), series: .value("Line", "Even pace"))
-                .foregroundStyle(Color.secondary)
-                .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 4]))
-            LineMark(x: .value("Time", week.end), y: .value("Percent", 100), series: .value("Line", "Even pace"))
-                .foregroundStyle(Color.secondary)
-                .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 4]))
-
-            ForEach(week.points.filter { $0.weekly != nil }) { point in
-                LineMark(x: .value("Time", point.at), y: .value("Percent", point.weekly ?? 0), series: .value("Line", "All models"))
-                    .foregroundStyle(DashboardPalette.allModels)
-                    .interpolationMethod(.monotone)
-            }
-            if showFable {
-                ForEach(week.points.filter { $0.fable != nil }) { point in
-                    LineMark(x: .value("Time", point.at), y: .value("Percent", point.fable ?? 0), series: .value("Line", "Fable"))
-                        .foregroundStyle(DashboardPalette.fable)
-                        .interpolationMethod(.monotone)
-                }
-            }
-
-            ForEach(weeklyProjection) { point in
-                LineMark(x: .value("Time", point.at), y: .value("Percent", point.value), series: .value("Line", "All models forecast"))
-                    .foregroundStyle(DashboardPalette.allModels.opacity(0.55))
-                    .lineStyle(StrokeStyle(lineWidth: 2, dash: [5, 4]))
-            }
-            if showFable {
-                ForEach(fableProjection) { point in
-                    LineMark(x: .value("Time", point.at), y: .value("Percent", point.value), series: .value("Line", "Fable forecast"))
-                        .foregroundStyle(DashboardPalette.fable.opacity(0.55))
-                        .lineStyle(StrokeStyle(lineWidth: 2, dash: [5, 4]))
-                }
-            }
-            RuleMark(x: .value("Now", now))
-                .foregroundStyle(Color.primary.opacity(0.35))
-                .annotation(position: .top, alignment: .leading) {
-                    Text("now").font(.caption2).foregroundStyle(.secondary)
-                }
-        }
-        .chartXScale(domain: week.start...week.end)
-        .chartYScale(domain: 0...100)
-        .chartYAxis {
-            AxisMarks(position: .leading, values: [0, 25, 50, 75, 100]) { value in
-                AxisGridLine()
-                AxisValueLabel { if let percent = value.as(Int.self) { Text("\(percent)%") } }
-            }
-        }
-        .chartXAxis {
-            AxisMarks(values: .stride(by: .day)) { _ in
-                AxisGridLine()
-                AxisValueLabel(format: .dateTime.weekday(.narrow))
-            }
-        }
-        .accessibilityLabel("Weekly and Fable percentages this week compared with an even pace"
-                            + (hasProjection ? ", with dashed lines showing where they're heading" : ""))
-    }
-}
-
-struct FiveHourChart: View {
-    let series: [SeriesPoint]
-    let now: Date
-
-    private struct Segmented: Identifiable {
-        let point: SeriesPoint
-        let segment: Int
-        var id: Date { point.at }
-    }
-
-    /// The line breaks where readings stop for more than 20 minutes or a session resets, so gaps aren't drawn as usage.
-    private var segmented: [Segmented] {
-        var segment = 0
-        var previous: SeriesPoint?
-        return series.map { point in
-            if let previous, point.at.timeIntervalSince(previous.at) > 20 * 60 || point.value < previous.value - 15 {
-                segment += 1
-            }
-            previous = point
-            return Segmented(point: point, segment: segment)
-        }
-    }
-
-    var body: some View {
-        Chart {
-            ForEach(segmented) { item in
-                LineMark(x: .value("Time", item.point.at), y: .value("Percent", item.point.value),
-                         series: .value("Session", item.segment))
-                    .foregroundStyle(DashboardPalette.fiveHour)
-                    .lineStyle(StrokeStyle(lineWidth: 2))
-            }
-            RuleMark(y: .value("Warning", 90))
-                .foregroundStyle(Color.red.opacity(0.5))
-                .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
-                .annotation(position: .top, alignment: .trailing) {
-                    Text("90%").font(.caption2).foregroundStyle(.secondary)
-                }
-        }
-        .chartXScale(domain: now.addingTimeInterval(-86_400)...now)
-        .chartYScale(domain: 0...100)
-        .chartYAxis {
-            AxisMarks(position: .leading, values: [0, 50, 100]) { value in
-                AxisGridLine()
-                AxisValueLabel { if let percent = value.as(Int.self) { Text("\(percent)%") } }
-            }
-        }
-        .chartXAxis {
-            AxisMarks(values: .stride(by: .hour, count: 6)) { _ in
-                AxisGridLine()
-                AxisValueLabel(format: .dateTime.hour())
-            }
-        }
-        .accessibilityLabel("Five-hour session percentage over the last 24 hours")
     }
 }

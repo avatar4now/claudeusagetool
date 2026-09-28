@@ -2,26 +2,47 @@ import SwiftUI
 
 // Pure views with no live state, so they can be rendered and checked in isolation.
 
-/// The symbol and headline shown in the menu bar, such as "F 94%" or "5h 22% ⚠︎F".
+/// The picture and text shown in the menu bar, such as a gauge and "F 94%", or a colored ring and "5h 22% ⚠︎F".
 struct MenuBarLabel: View {
     let headline: Headline
     let isStale: Bool
     /// Why there are no numbers to show, or nil when there are numbers (or nothing is wrong).
     let problem: ProblemCause?
+    var appearance: Appearance = .standard
+    /// The shown limit, drawn with the chosen look. The ring uses its fill and color.
+    var display: LimitDisplay? = nil
+    var now: Date = Date()
 
-    /// The symbol says whether the number is current. The menu bar draws only the first image in a label, so a nearly
-    /// full limit that isn't shown is flagged in the text instead, and a stale reading and a warning can both be seen.
-    var symbol: String {
-        if let problem { return problem.symbol }
-        if isStale { return "clock.badge.exclamationmark" }
-        if headline.awaitingReset { return "arrow.clockwise" }
-        return "gauge.with.dots.needle.33percent"
+    enum Icon: Equatable {
+        case symbol(String)
+        case ring
+        case none
     }
+
+    /// Problems, old data, and a passed reset always show their own symbol, whatever style is chosen, so they're
+    /// never hidden. The menu bar draws only the first image in a label, so a nearly full limit that isn't shown is
+    /// flagged in the text instead.
+    var icon: Icon {
+        if let problem { return .symbol(problem.symbol) }
+        if isStale { return .symbol("clock.badge.exclamationmark") }
+        if headline.awaitingReset { return .symbol("arrow.clockwise") }
+        let used = headline.percent ?? 0
+        switch appearance.menuBarIcon {
+        case .status: return .symbol("gauge.with.dots.needle.33percent")
+        case .gauge: return .symbol(MenuBarSymbols.gauge(percentUsed: used))
+        case .battery: return .symbol(MenuBarSymbols.battery(percentUsed: used))
+        case .ring: return display?.percent == nil ? .symbol("gauge.with.dots.needle.33percent") : .ring
+        case .none: return .none
+        }
+    }
+
+    var text: String { headline.menuBarText(appearance, now: now) }
 
     var accessibilityText: String {
         var parts = ["Claude usage"]
         if let limit = headline.limit {
-            parts.append("\(limit.title), \(headline.text.split(separator: " ").last.map(String.init) ?? "")")
+            parts.append("\(limit.title), \(appearance.percentText(UsageFormatting.wholePercent(headline.percent)))"
+                         + (appearance.numbers == .used ? " used" : ""))
         }
         if let warning = headline.hiddenWarningSummary { parts.append(warning) }
         if headline.awaitingReset { parts.append("waiting to confirm the reset") }
@@ -32,9 +53,18 @@ struct MenuBarLabel: View {
 
     var body: some View {
         HStack(spacing: 4) {
-            Image(systemName: symbol)
-            Text(headline.menuBarText)
-                .monospacedDigit()
+            switch icon {
+            case .symbol(let name):
+                Image(systemName: name)
+            case .ring:
+                Image(nsImage: MenuBarRing.image(fraction: display?.barFraction ?? 0, tint: display?.tint))
+            case .none:
+                EmptyView()
+            }
+            if !text.isEmpty {
+                Text(text)
+                    .monospacedDigit()
+            }
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(accessibilityText)
@@ -51,6 +81,10 @@ struct UsageMenuContent: View {
     let refreshSeconds: Int
     let version: String
     let now: Date
+    var appearance: Appearance = .standard
+    /// True when no account is connected yet.
+    var needsSetup = false
+    var onSetUp: () -> Void = {}
     var onChangeRefreshInterval: (Int) -> Void = { _ in }
     var onRefresh: () -> Void = {}
     var onOpenDashboard: () -> Void = {}
@@ -94,16 +128,25 @@ struct UsageMenuContent: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             // A newer problem (for example after a manual retry during a long wait) is shown alongside the cooldown.
-            if let error, !(activeCooldown != nil && error.isRateLimited) {
+            if let error, !needsSetup, !(activeCooldown != nil && error.isRateLimited) {
                 Label(error.message, systemImage: ProblemCause(error).symbol)
                     .font(.caption)
                     .foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            if snapshot != nil {
+            if needsSetup {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Connect your Claude account to see your limits here.")
+                        .font(.callout)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button("Set Up…", action: onSetUp)
+                        .buttonStyle(.borderedProminent)
+                }
+            } else if snapshot != nil {
                 ForEach(visibleLimits, id: \.self) { kind in
-                    MenuUsageRow(display: LimitDisplay.make(kind, snapshot: snapshot, now: now, isStale: isStale),
+                    MenuUsageRow(display: LimitDisplay.make(kind, snapshot: snapshot, now: now, isStale: isStale,
+                                                            appearance: appearance),
                                  dimmed: isStale)
                 }
             } else if error == nil {
@@ -164,8 +207,7 @@ struct MenuUsageRow: View {
                     .monospacedDigit()
                     .foregroundStyle(display.color)
             }
-            UsageProgressBar(utilization: display.percent ?? 0, height: 6,
-                             paceFraction: display.pace?.elapsedFraction, isUnknown: display.percent == nil)
+            UsageProgressBar(display: display, height: 6)
             if !detail.isEmpty {
                 Text(detail)
                     .font(.caption2)
@@ -174,7 +216,7 @@ struct MenuUsageRow: View {
         }
         .opacity(dimmed || display.awaitingReset ? 0.6 : 1)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(display.kind.title), \(display.percent.map { "\($0) percent used" } ?? "not reported")"
+        .accessibilityLabel("\(display.kind.title), \(display.percent == nil ? "not reported" : display.percentText.replacingOccurrences(of: "%", with: " percent") + (display.appearance.numbers == .used ? " used" : ""))"
                             + (detail.isEmpty ? "" : ", \(detail)"))
     }
 }

@@ -10,7 +10,7 @@ private let logger = Logger(subsystem: "dev.huan.ClaudeUsageWidget", category: "
 // MARK: - Entry
 
 struct ClaudeUsageEntry: TimelineEntry {
-    let date: Date
+    var date: Date
     let snapshot: UsageSnapshot?
     /// When the numbers were fetched, which is not when the widget was drawn.
     let fetchedAt: Date?
@@ -23,19 +23,27 @@ struct ClaudeUsageEntry: TimelineEntry {
     let nextAttempt: Date?
     /// When to check again because the app promised to publish by then.
     var reloadHint: Date? = nil
+    /// The look chosen in the app: theme, used or left, reset times, and pace marks.
+    var appearance: Appearance = .standard
 
     var isStale: Bool {
         snapshot != nil && Freshness.isStale(fetchedAt: fetchedAt, refreshSeconds: refreshSeconds, now: date)
     }
 
     func display(_ kind: LimitKind) -> LimitDisplay {
-        LimitDisplay.make(kind, snapshot: snapshot, now: date, isStale: isStale)
+        LimitDisplay.make(kind, snapshot: snapshot, now: date, isStale: isStale, appearance: appearance)
+    }
+
+    /// The limit closest to full, for the small widget's big number.
+    var headline: Headline {
+        Headline.make(for: snapshot, metric: .auto, now: date, warningAt: Double(appearance.redAt))
     }
 
     /// The same data, drawn at a later moment (a reset time, or when it goes stale).
     func at(_ later: Date) -> ClaudeUsageEntry {
-        ClaudeUsageEntry(date: later, snapshot: snapshot, fetchedAt: fetchedAt, refreshSeconds: refreshSeconds,
-                         notice: notice, cause: cause, nextAttempt: nextAttempt, reloadHint: reloadHint)
+        var copy = self
+        copy.date = later
+        return copy
     }
 
     static func problem(_ error: UsageError, refreshSeconds: Int, now: Date, nextAttempt: Date? = nil) -> ClaudeUsageEntry {
@@ -101,6 +109,12 @@ struct ClaudeAPIFetcher {
         // The widget runs in the background, so a keychain problem must become a message, never a dialog.
         KeychainCredentialStore.preventKeychainDialogs()
         let state = KeychainUsageStateStore().load()
+        var entry = await entry(now: now, state: state)
+        entry.appearance = state?.appearance ?? .standard
+        return entry
+    }
+
+    private static func entry(now: Date, state: SharedUsageState?) async -> ClaudeUsageEntry {
         let refreshSeconds = RefreshSchedule.sanitized(state?.refreshSeconds)
 
         let config: WidgetConfig
@@ -209,7 +223,7 @@ struct ClaudeUsageProvider: TimelineProvider {
 
 // MARK: - Subviews
 
-// Color.usageColor, UsageProgressBar, and LimitDisplay's text and color live in Shared/, so the menu bar matches.
+// UsageProgressBar, UsageRingTrack, and LimitDisplay's text and color live in Shared/, so the menu bar matches.
 
 /// The bottom line: a problem, a stale warning, or (when all is well) the given text.
 struct StatusLine: View {
@@ -347,14 +361,14 @@ struct ClaudeUsageSmallView: View {
             let weekly = entry.display(.weekly)
             let fable = entry.display(.fableWeekly)
             // The big number is the limit closest to full, labeled with which limit it is (for example "F 94%").
-            let headline = Headline.make(for: entry.snapshot, metric: .auto, now: entry.date)
+            let headline = entry.headline
             let headlineDisplay = headline.limit.map { entry.display($0) }
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 4) {
                     Text("Claude")
                         .font(.system(size: 13, weight: .bold))
                     Spacer()
-                    Text(headline.text)
+                    Text(headline.limit.map { "\($0.shortLabel) \(headlineDisplay?.percentText ?? "—")" } ?? headline.text)
                         .font(.system(size: 18, weight: .heavy, design: .rounded))
                         .foregroundStyle(headlineDisplay?.color ?? Color.secondary)
                         .lineLimit(1)
@@ -386,8 +400,7 @@ struct SmallBar: View {
             Text(title)
                 .font(.system(size: 9, weight: .medium))
                 .foregroundStyle(.secondary)
-            UsageProgressBar(utilization: display.percent ?? 0, height: height,
-                             paceFraction: display.pace?.elapsedFraction, isUnknown: display.percent == nil)
+            UsageProgressBar(display: display, height: height)
         }
         .opacity(display.awaitingReset ? 0.6 : 1)
     }
@@ -454,27 +467,14 @@ struct UsageRing: View {
 
     var body: some View {
         ZStack {
-            Circle()
-                .stroke(Color.primary.opacity(0.12), lineWidth: 6)
-            if let percent = display.percent {
-                Circle()
-                    .trim(from: 0, to: CGFloat(min(percent, 100)) / 100.0)
-                    .stroke(Color.usageColor(for: percent), style: StrokeStyle(lineWidth: 6, lineCap: .round))
-                    .rotationEffect(.degrees(-90))
-            }
-            if let pace = display.pace {
-                Capsule()
-                    .fill(Color.primary.opacity(0.75))
-                    .frame(width: 2, height: 10)
-                    .offset(y: -35)
-                    .rotationEffect(.degrees(360 * pace.elapsedFraction))
-            }
+            UsageRingTrack(display: display, lineWidth: 6)
             VStack(spacing: 0) {
-                Text(display.percent.map(String.init) ?? "—")
+                Text(display.numberText)
                     .font(.system(size: 22, weight: .heavy, design: .rounded))
                     .foregroundStyle(display.color)
-                Text("%")
-                    .font(.system(size: 10, weight: .medium))
+                    .minimumScaleFactor(0.7)
+                Text(display.percent == nil ? " " : "% \(display.appearance.numberCaption)")
+                    .font(.system(size: 9, weight: .medium))
                     .foregroundStyle(.secondary)
             }
         }
@@ -536,7 +536,7 @@ struct ClaudeUsageLargeView: View {
                         Divider().frame(height: 30).padding(.horizontal, 8)
                         StatBox(label: "Weekly", value: weekly.percentText, color: weekly.color)
                         Divider().frame(height: 30).padding(.horizontal, 8)
-                        let tightest = Headline.make(for: entry.snapshot, metric: .auto, now: entry.date).limit.map { entry.display($0) }
+                        let tightest = entry.headline.limit.map { entry.display($0) }
                         StatBox(label: tightest.map { "Status · \($0.kind.shortLabel)" } ?? "Status",
                                 value: tightest?.percent.map(statusText) ?? "—", color: tightest?.color ?? Color.secondary)
                     }
@@ -574,8 +574,7 @@ struct UsageCard: View {
                     .font(.system(size: 18, weight: .heavy, design: .rounded))
                     .foregroundStyle(display.color)
             }
-            UsageProgressBar(utilization: display.percent ?? 0, height: barHeight,
-                             paceFraction: display.pace?.elapsedFraction, isUnknown: display.percent == nil)
+            UsageProgressBar(display: display, height: barHeight)
             let detail = [display.resetText, display.pace?.status.label].compactMap { $0 }.joined(separator: " · ")
             if !detail.isEmpty {
                 Text(detail)
@@ -610,8 +609,7 @@ struct MiniMetric: View {
                     .font(.system(size: 11, weight: .semibold, design: .monospaced))
                     .foregroundStyle(display.color)
             }
-            UsageProgressBar(utilization: display.percent ?? 0, height: 5,
-                             paceFraction: display.pace?.elapsedFraction, isUnknown: display.percent == nil)
+            UsageProgressBar(display: display, height: 5)
         }
         .opacity(display.awaitingReset ? 0.6 : 1)
     }

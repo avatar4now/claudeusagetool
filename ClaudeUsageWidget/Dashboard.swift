@@ -6,6 +6,7 @@ struct Dashboard: View {
     @ObservedObject var monitor: UsageMonitor
     @Environment(\.openWindow) private var openWindow
     @AppStorage("dashboardRange") private var rangeRaw = HistoryRange.twoWeeks.rawValue
+    @AppStorage(SettingsTab.storageKey) private var settingsTab = SettingsTab.account.rawValue
     @State private var samples: [UsageSample] = []
 
     var body: some View {
@@ -22,8 +23,13 @@ struct Dashboard: View {
                 isHistoryEnabled: monitor.isHistoryEnabled,
                 now: context.date,
                 range: Binding(get: { HistoryRange(rawValue: rangeRaw) ?? .twoWeeks }, set: { rangeRaw = $0.rawValue }),
+                appearance: monitor.appearance,
                 onRefresh: { Task { await monitor.refresh(trigger: .manual) } },
-                onOpenSettings: { openWindow(id: AppWindow.settings) }
+                onOpenSettings: { openWindow(id: AppWindow.settings) },
+                onCustomize: {
+                    settingsTab = SettingsTab.appearance.rawValue
+                    openWindow(id: AppWindow.settings)
+                }
             )
         }
         .frame(minWidth: 860, minHeight: 640, idealHeight: 860)

@@ -31,6 +31,10 @@ final class UsageMonitor: ObservableObject {
     /// Changes whenever a reading is added to (or cleared from) the history, so the dashboard reloads.
     @Published private(set) var historyRevision = 0
     @Published private(set) var isHistoryEnabled: Bool
+    /// How the app, menu bar, and widget look.
+    @Published private(set) var appearance: Appearance
+    /// False until credentials are saved, so the menu bar can offer setup instead of an error.
+    @Published private(set) var hasCredentials = false
 
     /// The dashboard's history file, inside this app's sandbox container.
     let history = UsageHistoryStore.appDefault
@@ -50,6 +54,7 @@ final class UsageMonitor: ObservableObject {
     private static let refreshKey = "refreshSeconds"
     private static let metricKey = "menuBarMetric"
     private static let historyKey = "keepHistory"
+    private static let appearanceKey = "appearance"
 
     init() {
         store = .forThisApp
@@ -58,6 +63,8 @@ final class UsageMonitor: ObservableObject {
         refreshSeconds = RefreshSchedule.sanitized(defaults.object(forKey: Self.refreshKey) as? Int)
         menuBarMetric = MenuBarMetric(rawValue: defaults.string(forKey: Self.metricKey) ?? "") ?? .auto
         isHistoryEnabled = defaults.object(forKey: Self.historyKey) as? Bool ?? true
+        appearance = defaults.data(forKey: Self.appearanceKey).flatMap { try? JSONDecoder().decode(Appearance.self, from: $0) }
+            ?? .standard
 
         // Credentials saved before version 1.3 have no generation. Give them one, so cached numbers can be matched
         // to them and the widget can reuse the app's readings instead of fetching again.
@@ -73,6 +80,7 @@ final class UsageMonitor: ObservableObject {
 
         // Show the last reading right away if it came from the credentials saved now, and keep any cooldown.
         generation = (try? store.load())?.generation
+        hasCredentials = generation != nil
         let state = sharedState.load()
         if let cached = RefreshSchedule.cachedSnapshot(in: state, generation: generation) {
             snapshot = cached.snapshot
@@ -120,7 +128,18 @@ final class UsageMonitor: ObservableObject {
     }
 
     var headline: Headline {
-        Headline.make(for: snapshot, metric: menuBarMetric)
+        Headline.make(for: snapshot, metric: menuBarMetric, warningAt: Double(appearance.redAt))
+    }
+
+    /// Saves a new look and hands it to the widget, which redraws with it.
+    func setAppearance(_ newValue: Appearance) {
+        let value = newValue.sanitized()
+        guard value != appearance else { return }
+        appearance = value
+        if let data = try? JSONEncoder().encode(value) {
+            UserDefaults.standard.set(data, forKey: Self.appearanceKey)
+        }
+        publishToWidget()
     }
 
     /// Changes how often both the menu bar and the widget refresh.
@@ -174,6 +193,7 @@ final class UsageMonitor: ObservableObject {
     /// A server cooldown stays in force: new credentials don't earn an early retry.
     func credentialsChanged() {
         generation = (try? store.load())?.generation
+        hasCredentials = generation != nil
         snapshot = nil
         lastSuccessAt = nil
         error = nil
@@ -298,7 +318,7 @@ final class UsageMonitor: ObservableObject {
         Task { await refresh(trigger: .automatic) }
     }
 
-    /// Shares the current numbers, cooldown, credential generation, latest problem and its cause, and a heartbeat with
+    /// Shares the current numbers, cooldown, credential generation, latest problem and its cause, the look, and a heartbeat with
     /// the widget, then asks it to redraw. The heartbeat runs a little past the next wake-up; while it lasts the widget
     /// waits for the app instead of sending its own request.
     private func publishToWidget(force: Bool = false) {
@@ -306,7 +326,7 @@ final class UsageMonitor: ObservableObject {
         let state = SharedUsageState(refreshSeconds: refreshSeconds, snapshot: snapshot, fetchedAt: lastSuccessAt,
                                      cooldown: cooldown, credentialGeneration: generation,
                                      appHeartbeatUntil: heartbeat, appErrorMessage: error?.message,
-                                     appProblemCause: error.map(ProblemCause.init))
+                                     appProblemCause: error.map(ProblemCause.init), appearance: appearance)
         guard force || state != lastPublished else { return }
         do {
             try sharedState.save(state)
@@ -341,6 +361,17 @@ extension KeychainUsageStateStore {
 enum AppWindow {
     static let dashboard = "dashboard"
     static let settings = "settings"
+    static let setup = "setup"
+}
+
+/// The tabs of the Settings window. The selected tab is remembered, and other windows can pick one before opening it.
+enum SettingsTab: String, CaseIterable {
+    case account
+    case appearance
+    case general
+    case about
+
+    static let storageKey = "settingsTab"
 }
 
 /// Shows the app in the Dock and app switcher while any of its windows is open, and hides it again when they close.
@@ -361,8 +392,8 @@ enum WindowPresence {
 }
 
 enum AppLaunch {
-    /// Settings opens by itself only when there's nothing to show yet; otherwise the app starts quietly in the menu bar.
-    static var showsSettingsAtLaunch: Bool {
+    /// The setup assistant opens by itself only when no account is connected yet.
+    static var needsSetup: Bool {
         let config = try? KeychainCredentialStore.forThisApp.load()
         return config?.isEmpty ?? true
     }
