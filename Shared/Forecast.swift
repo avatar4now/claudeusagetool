@@ -212,18 +212,11 @@ struct ForecastRow: Equatable, Sendable {
                      calendar: Calendar = .current, locale: Locale = .current) -> ForecastRow {
         let status = ForecastStatus(outcome)
 
-        /// "9:40 PM" today, "Wed 9:40 PM" within the next few days, or "Mon, Sep 21 at 9:40 PM" about a week away,
-        /// where the weekday alone could be mistaken for this week's.
         func moment(_ date: Date) -> String {
-            var style = Date.FormatStyle(locale: locale, calendar: calendar, timeZone: calendar.timeZone).hour().minute()
-            if !calendar.isDate(date, inSameDayAs: now) { style = style.weekday(.abbreviated) }
-            let days = calendar.dateComponents([.day], from: calendar.startOfDay(for: now), to: calendar.startOfDay(for: date)).day ?? 0
-            if abs(days) >= 6 { style = style.month(.abbreviated).day() }
-            return date.formatted(style)
+            UsageFormatting.moment(date, now: now, calendar: calendar, locale: locale)
         }
-        /// "at 9:40 PM" today, otherwise "Wed 9:40 PM".
         func resetMoment(_ date: Date) -> String {
-            calendar.isDate(date, inSameDayAs: now) ? "at \(moment(date))" : moment(date)
+            UsageFormatting.resetMoment(date, now: now, calendar: calendar, locale: locale)
         }
 
         switch outcome {

@@ -16,6 +16,8 @@ struct SharedUsageState: Codable, Equatable, Sendable {
     var appErrorMessage: String? = nil
     /// The kind of problem behind appErrorMessage, so the widget can show the matching icon and title.
     var appProblemCause: ProblemCause? = nil
+    /// How the app is set to look, so the widget can use the same colors, numbers, and reset times.
+    var appearance: Appearance? = nil
     var schemaVersion: Int = SharedUsageState.currentSchemaVersion
 
     func encoded() throws -> Data { try JSONEncoder().encode(self) }
@@ -44,6 +46,8 @@ extension SharedUsageState {
         // A cause this build doesn't know (from a newer app) is dropped rather than failing the whole state.
         let causeText = (try? container.decodeIfPresent(String.self, forKey: .appProblemCause)) ?? nil
         appProblemCause = causeText.flatMap(ProblemCause.init(rawValue:))
+        // An appearance this build can't read is dropped; the widget then uses the standard look.
+        appearance = (try? container.decodeIfPresent(Appearance.self, forKey: .appearance)) ?? nil
         schemaVersion = try container.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 1
     }
 }

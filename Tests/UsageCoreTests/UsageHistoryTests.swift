@@ -167,4 +167,74 @@ final class UsageHistoryTests: XCTestCase {
         XCTAssertEqual(store.load(now: at(14, 12)), [])
         XCTAssertNoThrow(try store.clear())
     }
+
+    // MARK: Chart extras
+
+    func weekly(_ date: Date, _ value: Double, _ reset: Date) -> UsageSample {
+        UsageSample(at: date, fiveHour: nil, fiveHourReset: nil, weekly: value, weeklyReset: reset, fable: nil, fableReset: nil)
+    }
+
+    func testWeeklyResetsInsideTheRange() {
+        let first = at(18, 12)
+        let second = at(25, 12)
+        let samples = [
+            weekly(at(15, 9), 40, first),
+            weekly(at(17, 9), 80, first.addingTimeInterval(120)),
+            weekly(at(19, 9), 5, second),
+        ]
+        XCTAssertEqual(UsageHistoryAnalysis.weeklyResets(samples, from: at(14, 0), to: at(20, 0)), [first],
+                       "a two-minute wobble is the same reset, and the next reset hasn't happened yet")
+        XCTAssertEqual(UsageHistoryAnalysis.weeklyResets(samples, from: at(19, 0), to: at(20, 0)), [])
+        XCTAssertEqual(UsageHistoryAnalysis.weeklyResets([], from: at(14, 0), to: at(20, 0)), [])
+    }
+
+    func testHourlyRhythmCreditsRisesToTheHourTheyHappenedIn() {
+        let reset = at(18, 12)
+        let next = at(25, 12)
+        let samples = [
+            weekly(at(1, 9, 0), 1, at(4, 12)),
+            weekly(at(1, 9, 20), 9, at(4, 12)),   // before the range: left out
+            weekly(at(14, 9, 0), 10, reset),
+            weekly(at(14, 9, 20), 13, reset),     // +3 on Monday at 9 AM
+            weekly(at(14, 9, 40), 14, reset),     // +1 on Monday at 9 AM
+            weekly(at(14, 12, 0), 30, reset),     // +16 after a gap of over an hour: can't be placed
+            weekly(at(14, 12, 30), 32, reset),    // +2 on Monday at 12 PM
+            weekly(at(18, 12, 10), 4, next),      // days later: can't be placed
+            weekly(at(18, 12, 30), 6, next),      // +2 on Friday at 12 PM
+        ]
+        let cells = UsageHistoryAnalysis.hourlyRhythm(samples, days: 14, endingOn: at(20, 12), calendar: calendar)
+        XCTAssertEqual(cells.count, 7 * 24, "every hour of every weekday has a cell, even when empty")
+        XCTAssertEqual(Set(cells.map(\.id)).count, 7 * 24)
+        func points(weekday: Int, hour: Int) -> Double? {
+            cells.first { $0.weekday == weekday && $0.hour == hour }?.points
+        }
+        XCTAssertEqual(points(weekday: 2, hour: 9), 4, "Monday is weekday 2")
+        XCTAssertEqual(points(weekday: 2, hour: 12), 2)
+        XCTAssertEqual(points(weekday: 6, hour: 12), 2, "Friday is weekday 6")
+        XCTAssertEqual(cells.map(\.points).reduce(0, +), 8)
+    }
+
+    func testHourlyRhythmCountsANewWindowFromZero() {
+        let samples = [weekly(at(18, 11, 50), 88, at(18, 12)), weekly(at(18, 12, 10), 3, at(25, 12))]
+        let cells = UsageHistoryAnalysis.hourlyRhythm(samples, days: 7, endingOn: at(20, 12), calendar: calendar)
+        XCTAssertEqual(cells.first { $0.weekday == 6 && $0.hour == 12 }?.points, 3,
+                       "after a reset the new reading is all new usage, placed at the midpoint between readings")
+    }
+
+    func testCurrentWindowKeepsOnlyReadingsFromThisWindow() {
+        let old = at(14, 13)
+        let current = at(14, 18)
+        let samples = [
+            UsageSample(at: at(14, 9), fiveHour: 40, fiveHourReset: old, weekly: nil, weeklyReset: nil, fable: nil, fableReset: nil),
+            UsageSample(at: at(14, 13, 30), fiveHour: 5, fiveHourReset: current.addingTimeInterval(60), weekly: nil,
+                        weeklyReset: nil, fable: nil, fableReset: nil),
+            UsageSample(at: at(14, 14), fiveHour: 12, fiveHourReset: current, weekly: nil, weeklyReset: nil, fable: nil, fableReset: nil),
+            UsageSample(at: at(14, 15), fiveHour: nil, fiveHourReset: nil, weekly: 50, weeklyReset: at(18, 12), fable: nil, fableReset: nil),
+        ]
+        let series = UsageHistoryAnalysis.currentWindow(samples, kind: .fiveHour, resetsAt: current, now: at(14, 16))
+        XCTAssertEqual(series.map(\.value), [5, 12])
+        XCTAssertEqual(series.map(\.at), [at(14, 13, 30), at(14, 14)])
+        XCTAssertEqual(UsageHistoryAnalysis.currentWindow(samples, kind: .fiveHour, resetsAt: nil, now: at(14, 16)), [])
+        XCTAssertEqual(UsageHistoryAnalysis.currentWindow(samples, kind: .weekly, resetsAt: at(18, 12), now: at(14, 16)).map(\.value), [50])
+    }
 }

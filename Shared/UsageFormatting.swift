@@ -23,6 +23,35 @@ enum UsageFormatting {
         if hours > 0 { return "\(hours)h \(minutes)m" }
         return minutes > 0 ? "\(minutes)m" : "<1m"
     }
+
+    /// "9:40 PM" today, "Wed 9:40 PM" within the next few days, or "Mon, Sep 21 at 9:40 PM" about a week away,
+    /// where the weekday alone could be mistaken for this week's.
+    static func moment(_ date: Date, now: Date, calendar: Calendar = .current, locale: Locale = .current) -> String {
+        var style = Date.FormatStyle(locale: locale, calendar: calendar, timeZone: calendar.timeZone).hour().minute()
+        if !calendar.isDate(date, inSameDayAs: now) { style = style.weekday(.abbreviated) }
+        let days = calendar.dateComponents([.day], from: calendar.startOfDay(for: now), to: calendar.startOfDay(for: date)).day ?? 0
+        if abs(days) >= 6 { style = style.month(.abbreviated).day() }
+        return date.formatted(style)
+    }
+
+    /// "at 9:40 PM" today, otherwise the same as `moment`, such as "Wed 9:40 PM".
+    static func resetMoment(_ date: Date, now: Date, calendar: Calendar = .current, locale: Locale = .current) -> String {
+        let text = moment(date, now: now, calendar: calendar, locale: locale)
+        return calendar.isDate(date, inSameDayAs: now) ? "at \(text)" : text
+    }
+
+    /// A reset time in the chosen style: "Resets in 2h 10m", "Resets at 6:10 PM", or "Resets at 6:10 PM, in 2h 10m".
+    static func resetPhrase(until date: Date?, now: Date, style: ResetStyle,
+                            calendar: Calendar = .current, locale: Locale = .current) -> String? {
+        guard let date else { return nil }
+        guard date > now, let countdown = resetText(until: date, now: now) else { return "Resets now" }
+        let clock = resetMoment(date, now: now, calendar: calendar, locale: locale)
+        switch style {
+        case .countdown: return "Resets in \(countdown)"
+        case .clockTime: return "Resets \(clock)"
+        case .both: return "Resets \(clock), in \(countdown)"
+        }
+    }
 }
 
 /// The one-line result shown in the settings window after Save or Test Connection.

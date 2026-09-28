@@ -207,6 +207,70 @@ enum UsageHistoryAnalysis {
             .sorted { $0.at < $1.at }
             .compactMap { sample in sample.fiveHour.map { SeriesPoint(at: sample.at, value: $0) } }
     }
+
+    /// Readings of one limit from its current window (the window that resets at `resetsAt`), for a small trend line.
+    static func currentWindow(_ samples: [UsageSample], kind: LimitKind, resetsAt: Date?, now: Date) -> [SeriesPoint] {
+        guard let resetsAt else { return [] }
+        let start = resetsAt.addingTimeInterval(-kind.windowLength)
+        return samples
+            .filter { $0.at >= start && $0.at <= now.addingTimeInterval(60) && !HistoryPolicy.windowChanged($0.reset(for: kind), resetsAt) }
+            .sorted { $0.at < $1.at }
+            .compactMap { sample in sample.value(for: kind).map { SeriesPoint(at: sample.at, value: $0) } }
+    }
+
+    /// When the weekly limit reset between `from` and `to`, judged from the reset times the readings reported.
+    /// Reset times within a few minutes of each other are the same reset.
+    static func weeklyResets(_ samples: [UsageSample], from: Date, to: Date) -> [Date] {
+        var resets: [Date] = []
+        for reset in samples.sorted(by: { $0.at < $1.at }).compactMap(\.weeklyReset)
+        where !resets.contains(where: { !HistoryPolicy.windowChanged($0, reset) }) {
+            resets.append(reset)
+        }
+        return resets.filter { $0 >= from && $0 <= to }.sorted()
+    }
+
+    /// Readings further apart than this can't say which hour the usage between them happened in.
+    static let rhythmMaximumGap: TimeInterval = 60 * 60
+
+    /// Weekly (all models) points used in each hour of each weekday over the `days` days ending on `endingOn`.
+    /// Each rise between two close readings is placed at the time halfway between them; rises across longer gaps,
+    /// such as while the app was closed, are left out. Every weekday and hour gets a cell, even when it's empty.
+    static func hourlyRhythm(_ samples: [UsageSample], days: Int, endingOn end: Date, calendar: Calendar) -> [RhythmCell] {
+        let firstDay = calendar.date(byAdding: .day, value: -(max(days, 1) - 1), to: calendar.startOfDay(for: end)) ?? end
+        var totals: [Int: Double] = [:]
+        var previous: (value: Double, reset: Date?, at: Date)?
+        for sample in samples.sorted(by: { $0.at < $1.at }) {
+            guard let value = sample.weekly else { continue }
+            defer { previous = (value, sample.weeklyReset, sample.at) }
+            guard let last = previous, sample.at >= firstDay, sample.at <= end.addingTimeInterval(60),
+                  sample.at.timeIntervalSince(last.at) <= rhythmMaximumGap else { continue }
+            let points = rise(from: last, to: value, reset: sample.weeklyReset)
+            guard points > 0 else { continue }
+            let middle = last.at.addingTimeInterval(sample.at.timeIntervalSince(last.at) / 2)
+            let parts = calendar.dateComponents([.weekday, .hour], from: middle)
+            guard let weekday = parts.weekday, let hour = parts.hour else { continue }
+            totals[RhythmCell.key(weekday: weekday, hour: hour), default: 0] += points
+        }
+        return (1...7).flatMap { weekday in
+            (0..<24).map { hour in
+                RhythmCell(weekday: weekday, hour: hour, points: totals[RhythmCell.key(weekday: weekday, hour: hour)] ?? 0)
+            }
+        }
+    }
+}
+
+/// One hour of one weekday in the "when you use Claude" heatmap.
+struct RhythmCell: Identifiable, Equatable, Sendable {
+    /// 1 is Sunday and 7 is Saturday, as in Calendar.
+    let weekday: Int
+    /// 0 to 23.
+    let hour: Int
+    /// Weekly limit points used in this hour, added up across the range.
+    let points: Double
+
+    var id: Int { Self.key(weekday: weekday, hour: hour) }
+
+    static func key(weekday: Int, hour: Int) -> Int { weekday * 24 + hour }
 }
 
 // MARK: - The history file

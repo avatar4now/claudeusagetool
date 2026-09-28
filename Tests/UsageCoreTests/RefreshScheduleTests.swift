@@ -89,4 +89,20 @@ final class RefreshScheduleTests: XCTestCase {
         let wrongType = Data(#"{"refreshSeconds":60,"appProblemCause":7}"#.utf8)
         XCTAssertNil(try SharedUsageState.decode(wrongType).appProblemCause)
     }
+
+    func testAppearanceTravelsToTheWidget() throws {
+        var appearance = Appearance()
+        appearance.theme = .dusk
+        appearance.numbers = .left
+        let state = SharedUsageState(refreshSeconds: 120, snapshot: nil, fetchedAt: nil, appearance: appearance)
+        XCTAssertEqual(try SharedUsageState.decode(state.encoded()).appearance, appearance)
+
+        let old = Data(#"{"refreshSeconds":120,"schemaVersion":2}"#.utf8)
+        XCTAssertNil(try SharedUsageState.decode(old).appearance, "state from an older app has no appearance")
+
+        let broken = Data(#"{"refreshSeconds":120,"schemaVersion":2,"appearance":5,"appErrorMessage":"x"}"#.utf8)
+        let decoded = try SharedUsageState.decode(broken)
+        XCTAssertNil(decoded.appearance)
+        XCTAssertEqual(decoded.appErrorMessage, "x", "a bad appearance never breaks the rest of the handoff")
+    }
 }

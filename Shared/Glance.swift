@@ -131,6 +131,11 @@ struct Headline: Equatable, Sendable {
     let hiddenWarningLimits: [LimitKind]
     /// True when the shown limit's reset time has passed but no new reading has confirmed it.
     let awaitingReset: Bool
+    /// The shown limit's percentage and reset time, for menu bar styles that show more than the headline text.
+    var percent: Double? = nil
+    var resetsAt: Date? = nil
+    /// Hidden limits at or above this percentage are flagged.
+    var warningAt: Double = Headline.hiddenWarningThreshold
 
     static let hiddenWarningThreshold = 90.0
     /// The warning sign drawn as a plain text glyph (not a color emoji), so it matches the menu bar's text.
@@ -139,23 +144,50 @@ struct Headline: Equatable, Sendable {
     /// True when a limit the menu bar isn't showing is at or above 90%.
     var hiddenLimitWarning: Bool { !hiddenWarningLimits.isEmpty }
 
-    /// The menu bar's text, such as "5h 22% ⚠︎F". The menu bar draws only one symbol, so the warning is part of the text.
-    var menuBarText: String {
-        guard hiddenLimitWarning else { return text }
-        return "\(text) \(Self.warningSign)" + hiddenWarningLimits.map(\.shortLabel).joined(separator: " ")
+    /// The menu bar's text in the standard style, such as "5h 22% ⚠︎F".
+    var menuBarText: String { menuBarText(.standard) }
+
+    /// The menu bar's text in the chosen style, such as "5h 22% ⚠︎F", "22%", "5h 22% · 2h 10m", or "78% left".
+    /// The menu bar draws only one symbol, so a warning about a hidden limit is part of the text, and it stays even
+    /// when the style asks for no text.
+    func menuBarText(_ appearance: Appearance, now: Date = Date(), calendar: Calendar = .current,
+                     locale: Locale = .current) -> String {
+        guard let limit else { return text }
+        let number = appearance.percentText(UsageFormatting.wholePercent(percent))
+        var base: String
+        switch appearance.menuBarText {
+        case .labelAndPercent:
+            base = "\(limit.shortLabel) \(number)"
+        case .percentOnly:
+            base = number
+        case .percentAndReset:
+            base = "\(limit.shortLabel) \(number)"
+            if !awaitingReset, let resetsAt, resetsAt > now {
+                let piece = appearance.resetStyle == .clockTime
+                    ? UsageFormatting.moment(resetsAt, now: now, calendar: calendar, locale: locale)
+                    : UsageFormatting.resetText(until: resetsAt, now: now)
+                if let piece { base += " · \(piece)" }
+            }
+        case .none:
+            base = ""
+        }
+        guard hiddenLimitWarning else { return base }
+        let flag = Self.warningSign + hiddenWarningLimits.map(\.shortLabel).joined(separator: " ")
+        return base.isEmpty ? flag : "\(base) \(flag)"
     }
 
     /// Names the hidden limits for VoiceOver, such as "Weekly · Fable is above 90 percent". Nil when there are none.
     var hiddenWarningSummary: String? {
         guard hiddenLimitWarning else { return nil }
         let names = hiddenWarningLimits.map(\.title).joined(separator: " and ")
-        return "\(names) \(hiddenWarningLimits.count == 1 ? "is" : "are") above 90 percent"
+        return "\(names) \(hiddenWarningLimits.count == 1 ? "is" : "are") above \(Int(warningAt)) percent"
     }
 
     /// "Closest to full" picks the highest reported percentage among windows that haven't reset yet; ties go to
     /// the earlier limit in display order. That is not a forecast of which limit you'll hit first.
-    static func make(for snapshot: UsageSnapshot?, metric: MenuBarMetric, now: Date = Date()) -> Headline {
-        let empty = Headline(limit: nil, text: "—", hiddenWarningLimits: [], awaitingReset: false)
+    static func make(for snapshot: UsageSnapshot?, metric: MenuBarMetric, now: Date = Date(),
+                     warningAt: Double = hiddenWarningThreshold) -> Headline {
+        let empty = Headline(limit: nil, text: "—", hiddenWarningLimits: [], awaitingReset: false, warningAt: warningAt)
         guard let snapshot else { return empty }
         let reported = LimitKind.allCases.compactMap { kind in snapshot.percent(for: kind).map { (kind, $0) } }
         let current = reported.filter { !ResetBoundary.isAwaitingReset(snapshot.resetsAt(for: $0.0), now: now) }
@@ -167,9 +199,10 @@ struct Headline: Equatable, Sendable {
         }
         guard let shown else { return empty }
         let text = "\(shown.shortLabel) \(UsageFormatting.percentText(snapshot.percent(for: shown)))"
-        let warnings = current.filter { $0.0 != shown && $0.1 >= hiddenWarningThreshold }.map(\.0)
+        let warnings = current.filter { $0.0 != shown && $0.1 >= warningAt }.map(\.0)
         return Headline(limit: shown, text: text, hiddenWarningLimits: warnings,
-                        awaitingReset: ResetBoundary.isAwaitingReset(snapshot.resetsAt(for: shown), now: now))
+                        awaitingReset: ResetBoundary.isAwaitingReset(snapshot.resetsAt(for: shown), now: now),
+                        percent: snapshot.percent(for: shown), resetsAt: snapshot.resetsAt(for: shown), warningAt: warningAt)
     }
 
     private static func highest(_ readings: [(LimitKind, Double)]) -> LimitKind? {
@@ -209,23 +242,36 @@ struct LimitDisplay: Equatable, Sendable {
     /// Nil when pace can't be trusted: stale data, a passed reset, or too early in the window.
     let pace: PaceReading?
     let resetText: String?
+    /// The chosen look: colors, used or left, and pace marks.
+    var appearance: Appearance = .standard
 
-    static func make(_ kind: LimitKind, snapshot: UsageSnapshot?, now: Date, isStale: Bool) -> LimitDisplay {
+    /// "94%" or "6% left".
+    var percentText: String { appearance.percentText(percent) }
+    /// The bare number for a big display with a caption, such as "94" or "6".
+    var numberText: String { appearance.numberText(percent) }
+    /// The color for this limit, or nil when its percentage is unknown.
+    var tint: RGB? { appearance.color(percent: percent.map(Double.init), pace: pace) }
+    /// How much of a bar or ring to fill.
+    var barFraction: Double { percent.map(appearance.barFraction) ?? 0 }
+    /// Where to draw the even-pace tick, or nil when pace is unknown or pace marks are turned off.
+    var paceMarkFraction: Double? {
+        guard appearance.showPaceGuides, let pace else { return nil }
+        return appearance.paceMarkFraction(pace.elapsedFraction)
+    }
+
+    static func make(_ kind: LimitKind, snapshot: UsageSnapshot?, now: Date, isStale: Bool,
+                     appearance: Appearance = .standard, calendar: Calendar = .current,
+                     locale: Locale = .current) -> LimitDisplay {
         let percent = snapshot?.percent(for: kind)
         let resetsAt = snapshot?.resetsAt(for: kind)
         let awaiting = ResetBoundary.isAwaitingReset(resetsAt, now: now)
         let pace = (isStale || awaiting) ? nil
             : Pace.reading(percent: percent, resetsAt: resetsAt, window: kind.windowLength, now: now)
-        let resetText: String?
-        if awaiting {
-            resetText = "Awaiting reset"
-        } else if let remaining = UsageFormatting.resetText(until: resetsAt, now: now) {
-            resetText = "Resets in \(remaining)"
-        } else {
-            resetText = nil
-        }
+        let resetText = awaiting
+            ? "Awaiting reset"
+            : UsageFormatting.resetPhrase(until: resetsAt, now: now, style: appearance.resetStyle, calendar: calendar, locale: locale)
         return LimitDisplay(kind: kind, percent: UsageFormatting.wholePercent(percent), resetsAt: resetsAt,
-                            awaitingReset: awaiting, pace: pace, resetText: resetText)
+                            awaitingReset: awaiting, pace: pace, resetText: resetText, appearance: appearance)
     }
 }
 
