@@ -20,6 +20,9 @@ lsregister=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchSe
 expected_team=$(awk -F' = ' '/DEVELOPMENT_TEAM = /{gsub(/[;" ]/, "", $2); print $2; exit}' "$project/project.pbxproj")
 
 tmp_root="${TMPDIR:-/tmp}"
+# The test build lives outside the project folder. When the project sits in an iCloud-synced folder such as
+# Documents, iCloud tags files in a local build folder, and macOS then refuses to sign the test bundle.
+spm_build="$HOME/Library/Caches/ClaudeUsageWidget/spm"
 
 fail() { echo "✗ $*" >&2; exit 1; }
 
@@ -34,7 +37,7 @@ fi
 if [[ "${1:-}" != "--skip-tests" ]]; then
   echo "==> Running tests"
   test_log=$(mktemp -t claude-usage-tests)
-  if swift test >"$test_log" 2>&1; then
+  if swift test --scratch-path "$spm_build" >"$test_log" 2>&1; then
     grep -E 'Executed [0-9]+ tests' "$test_log" | tail -1 | sed -E 's/^[[:space:]]+/    /'
   else
     grep -E 'error:|failed' "$test_log" | head -20 >&2 || true
