@@ -9,6 +9,7 @@ private let logger = Logger(subsystem: "dev.huan.ClaudeUsageWidget", category: "
 struct SettingsView: View {
     @ObservedObject var monitor: UsageMonitor
     @ObservedObject var loginItem: LoginItemController
+    @ObservedObject var updates: UpdateChecker
 
     @State private var sessionKey = ""
     @State private var organizationId = ""
@@ -245,9 +246,78 @@ struct SettingsView: View {
                 Text("Your usage history and settings stay on this Mac. Your session key is kept in your login keychain and sent only to claude.ai.")
                     .foregroundStyle(.secondary)
             }
+            updatesSection
         }
         .formStyle(.grouped)
     }
+
+    /// Whether a newer version is out, and how to get it.
+    @ViewBuilder
+    private var updatesSection: some View {
+        Section {
+            if let repository = updates.repository {
+                LabeledContent("Status") {
+                    if updates.isChecking {
+                        ProgressView().controlSize(.small)
+                    } else if let available = updates.available {
+                        Label("Version \(available.version) is available", systemImage: "arrow.down.circle.fill")
+                            .foregroundStyle(.tint)
+                    } else if let problem = updates.problem {
+                        Text(problem).foregroundStyle(.secondary)
+                    } else if updates.lastChecked == nil {
+                        Text("Not checked yet").foregroundStyle(.secondary)
+                    } else {
+                        Text("Up to date").foregroundStyle(.secondary)
+                    }
+                }
+                if let lastChecked = updates.lastChecked {
+                    LabeledContent("Last checked", value: lastChecked.formatted(.relative(presentation: .named)))
+                }
+                if let available = updates.available {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("To update, open Terminal in the folder you cloned and run:")
+                        HStack {
+                            Text(Self.updateCommand)
+                                .font(.system(.callout, design: .monospaced))
+                                .textSelection(.enabled)
+                            Spacer()
+                            Button("Copy") {
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString(Self.updateCommand, forType: .string)
+                            }
+                        }
+                        .padding(8)
+                        .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.05)))
+                        Text("Or ask Claude Code to update Claude Usage Widget. Your settings, history, and saved key carry over.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        if let page = available.page ?? Optional(repository.releasesPage) {
+                            Link("What's new in \(available.version)", destination: page)
+                        }
+                    }
+                }
+                HStack {
+                    Toggle("Check for new versions once a day", isOn: Binding(get: { updates.isEnabled },
+                                                                              set: { updates.setEnabled($0) }))
+                    Spacer()
+                    Button("Check Now") { Task { await updates.checkNow() } }
+                        .disabled(updates.isChecking)
+                }
+            } else {
+                Text("This copy wasn't built from a GitHub clone, so it can't check for new versions.")
+                    .foregroundStyle(.secondary)
+            }
+        } header: {
+            Text("Updates")
+        } footer: {
+            if let repository = updates.repository {
+                Text("Checks the latest release of github.com/\(repository.path). It sends no account details or usage.")
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private static let updateCommand = "scripts/update-app.sh --pull"
 
     @ViewBuilder
     private var loginStatus: some View {

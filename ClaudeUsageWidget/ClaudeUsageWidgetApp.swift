@@ -7,6 +7,8 @@ struct ClaudeUsageWidgetApp: App {
     /// One monitor feeds the menu bar, the dashboard, and Settings.
     @StateObject private var monitor = UsageMonitor()
     @StateObject private var loginItem = LoginItemController()
+    /// Watches GitHub for a newer version of this copy.
+    @StateObject private var updates = UpdateChecker()
 
     var body: some Scene {
         // The first window is the one macOS reopens when you open the app while it's already running.
@@ -19,7 +21,7 @@ struct ClaudeUsageWidgetApp: App {
         .restorationBehavior(.disabled)
 
         Window("Settings", id: AppWindow.settings) {
-            SettingsView(monitor: monitor, loginItem: loginItem)
+            SettingsView(monitor: monitor, loginItem: loginItem, updates: updates)
         }
         .windowResizability(.contentMinSize)
         .defaultLaunchBehavior(.suppressed)
@@ -33,7 +35,7 @@ struct ClaudeUsageWidgetApp: App {
         .restorationBehavior(.disabled)
 
         MenuBarExtra {
-            UsageMenu(monitor: monitor)
+            UsageMenu(monitor: monitor, updates: updates)
         } label: {
             // monitor.clock ticks every 30 seconds, so staleness and reset state here stay current between fetches.
             let _ = monitor.clock

@@ -10,6 +10,8 @@ struct BuildInfo: Equatable, Sendable {
     let commit: String?
     let branch: String?
     let builtAt: Date?
+    /// The GitHub repository this copy was cloned from, used to check for new versions. Nil for other builds.
+    let sourceRepository: SourceRepository?
 
     /// Added to the commit when the build included changes that weren't committed yet.
     static let modifiedSuffix = "-modified"
@@ -26,6 +28,7 @@ struct BuildInfo: Equatable, Sendable {
         self.commit = commit == Self.modifiedSuffix ? nil : commit
         branch = value("CUWBuildBranch")
         builtAt = value("CUWBuildDate").flatMap { try? Date($0, strategy: .iso8601) }
+        sourceRepository = value("CUWSourceRepo").flatMap { SourceRepository(remote: $0) }
     }
 
     /// Like "Version 1.5 (5)".

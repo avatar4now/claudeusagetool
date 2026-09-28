@@ -2,6 +2,7 @@
 # Builds Claude Usage Widget, checks the build, and installs it as the one copy in ~/Applications.
 #
 #   scripts/update-app.sh               run the tests, build, install, restart
+#   scripts/update-app.sh --pull        get the latest version from GitHub first, then do the same
 #   scripts/update-app.sh --skip-tests  skip the tests
 #
 # Running the app from Xcode creates a second copy in Xcode's build folder, which can confuse the widget.
@@ -25,6 +26,21 @@ spm_build="$HOME/Library/Caches/ClaudeUsageWidget/spm"
 
 fail() { echo "✗ $*" >&2; exit 1; }
 
+skip_tests=false
+pull=false
+for argument in "$@"; do
+  case "$argument" in
+    --skip-tests) skip_tests=true ;;
+    --pull) pull=true ;;
+    *) fail "Unknown option $argument. Use --pull or --skip-tests." ;;
+  esac
+done
+
+if [[ "$pull" == true ]]; then
+  echo "==> Getting the latest version"
+  git pull --ff-only || fail "Couldn't update from GitHub. If you changed files here, commit or undo them, then try again."
+fi
+
 # Your Apple team signs the app. It lives in a file git ignores, so it's never published. On the first run the
 # script reads it from the Apple Development certificate Xcode made when you added your Apple ID.
 signing_local=Config/Signing.local.xcconfig
@@ -47,7 +63,7 @@ if [[ ! -d "$installed" && -d "$previous" ]]; then
   mv "$previous" "$installed"
 fi
 
-if [[ "${1:-}" != "--skip-tests" ]]; then
+if [[ "$skip_tests" != true ]]; then
   echo "==> Running tests"
   test_log=$(mktemp -t claude-usage-tests)
   if swift test --scratch-path "$spm_build" >"$test_log" 2>&1; then
@@ -78,6 +94,11 @@ if [[ -n "$build_commit" ]]; then
   fi
 fi
 build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+# The GitHub repository this copy came from, as owner/name, so the app can say when a newer version is out.
+# Only plain github.com addresses count, and any user name or token in the address is dropped.
+source_repo=$(git remote get-url origin 2>/dev/null \
+  | sed -E -e 's#^https://([^@/]*@)?github\.com/##' -e 's#^git@github\.com:##' -e 's#\.git$##' -e 's#/$##' || true)
+[[ "$source_repo" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || source_repo=""
 if [[ -n "$build_commit" ]]; then
   echo "    Commit $build_commit on ${build_branch:-an unknown branch}"
 else
@@ -102,6 +123,7 @@ if ! xcodebuild -project "$project" -scheme "$scheme" -configuration Release -de
      -derivedDataPath "$build_dir/DerivedData" \
      DEVELOPMENT_TEAM="$expected_team" \
      CUW_BUILD_COMMIT="$build_commit" CUW_BUILD_BRANCH="$build_branch" CUW_BUILD_DATE="$build_date" \
+     CUW_SOURCE_REPO="$source_repo" \
      build >"$build_log" 2>&1; then
   grep -E 'error:' "$build_log" | head -20 >&2 || true
   saved_log="$tmp_root/claude-usage-build-failed.log"

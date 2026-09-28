@@ -85,6 +85,9 @@ struct UsageMenuContent: View {
     /// True when no account is connected yet.
     var needsSetup = false
     var onSetUp: () -> Void = {}
+    /// A newer version published on GitHub, if there is one.
+    var updateVersion: String? = nil
+    var onShowUpdate: () -> Void = {}
     var onChangeRefreshInterval: (Int) -> Void = { _ in }
     var onRefresh: () -> Void = {}
     var onOpenDashboard: () -> Void = {}
@@ -179,9 +182,19 @@ struct UsageMenuContent: View {
             }
             .controlSize(.small)
 
-            Text(version)
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
+            HStack(spacing: 6) {
+                Text(version)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                if let updateVersion {
+                    Spacer()
+                    Button(action: onShowUpdate) {
+                        Label("Version \(updateVersion) is available", systemImage: "arrow.down.circle.fill")
+                            .font(.caption2.weight(.semibold))
+                    }
+                    .buttonStyle(.link)
+                }
+            }
         }
         .padding(14)
         .frame(width: 300)

@@ -120,4 +120,11 @@ final class BuildInfoTests: XCTestCase {
     func testBuiltTextSaysXcodeWhenThereIsNoDate() {
         XCTAssertEqual(BuildInfo(infoDictionary: nil).builtText(), "Built in Xcode")
     }
+
+    func testReadsTheRepositoryItWasBuiltFrom() {
+        XCTAssertEqual(BuildInfo(infoDictionary: ["CUWSourceRepo": "someone/tool"]).sourceRepository?.path, "someone/tool")
+        XCTAssertNil(BuildInfo(infoDictionary: ["CUWSourceRepo": "$(CUW_SOURCE_REPO)"]).sourceRepository, "Xcode left it unfilled")
+        XCTAssertNil(BuildInfo(infoDictionary: ["CUWSourceRepo": "  "]).sourceRepository)
+        XCTAssertNil(BuildInfo(infoDictionary: nil).sourceRepository)
+    }
 }

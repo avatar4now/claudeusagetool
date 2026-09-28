@@ -8,5 +8,7 @@
 	<string>$(CUW_BUILD_COMMIT)</string>
 	<key>CUWBuildDate</key>
 	<string>$(CUW_BUILD_DATE)</string>
+	<key>CUWSourceRepo</key>
+	<string>$(CUW_SOURCE_REPO)</string>
 </dict>
 </plist>

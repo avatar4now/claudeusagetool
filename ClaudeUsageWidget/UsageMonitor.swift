@@ -392,11 +392,12 @@ enum WindowPresence {
 }
 
 enum AppLaunch {
-    /// The setup assistant opens by itself only when no account is connected yet.
-    static var needsSetup: Bool {
+    /// The setup assistant opens by itself only when no account is connected yet. Worked out once, at launch,
+    /// because it only decides which window opens first.
+    static let needsSetup: Bool = {
         let config = try? KeychainCredentialStore.forThisApp.load()
         return config?.isEmpty ?? true
-    }
+    }()
 }
 
 enum AppVersion {
