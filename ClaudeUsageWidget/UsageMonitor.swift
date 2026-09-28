@@ -33,8 +33,11 @@ final class UsageMonitor: ObservableObject {
     @Published private(set) var isHistoryEnabled: Bool
     /// How the app, menu bar, and widget look.
     @Published private(set) var appearance: Appearance
-    /// False until credentials are saved, so the menu bar can offer setup instead of an error.
-    @Published private(set) var hasCredentials = false
+    /// False only when the keychain is known to hold no credentials, so the app can offer setup. A keychain that
+    /// can't be read counts as having credentials, so its real error is shown instead of a setup prompt.
+    @Published private(set) var hasCredentials = true
+    /// Changes whenever credentials are saved or removed, so an open Settings window can show the new ones.
+    @Published private(set) var credentialsRevision = 0
 
     /// The dashboard's history file, inside this app's sandbox container.
     let history = UsageHistoryStore.appDefault
@@ -80,7 +83,7 @@ final class UsageMonitor: ObservableObject {
 
         // Show the last reading right away if it came from the credentials saved now, and keep any cooldown.
         generation = (try? store.load())?.generation
-        hasCredentials = generation != nil
+        hasCredentials = Self.credentialsPresent(in: store)
         let state = sharedState.load()
         if let cached = RefreshSchedule.cachedSnapshot(in: state, generation: generation) {
             snapshot = cached.snapshot
@@ -125,6 +128,12 @@ final class UsageMonitor: ObservableObject {
 
     var isStale: Bool {
         snapshot != nil && Freshness.isStale(fetchedAt: lastSuccessAt, refreshSeconds: refreshSeconds, now: Date())
+    }
+
+    /// True when there's nothing to show because no account is connected yet. A keychain problem is shown as
+    /// itself instead.
+    var needsSetup: Bool {
+        !hasCredentials && (error == nil || error == .noCredentials)
     }
 
     var headline: Headline {
@@ -193,7 +202,8 @@ final class UsageMonitor: ObservableObject {
     /// A server cooldown stays in force: new credentials don't earn an early retry.
     func credentialsChanged() {
         generation = (try? store.load())?.generation
-        hasCredentials = generation != nil
+        hasCredentials = Self.credentialsPresent(in: store)
+        credentialsRevision += 1
         snapshot = nil
         lastSuccessAt = nil
         error = nil
@@ -231,14 +241,7 @@ final class UsageMonitor: ObservableObject {
 
         switch outcome.result {
         case .success(let report):
-            let fetchedAt = Date()
-            snapshot = report.snapshot
-            lastSuccessAt = fetchedAt
-            error = nil
-            recordHistory(report.snapshot, at: fetchedAt)
-            consecutiveRateLimits = 0
-            lastRateLimitAt = nil
-            cooldown = nil
+            show(report)
             logger.notice("Refresh (\(trigger.rawValue, privacy: .public)) succeeded via \(report.route.rawValue, privacy: .public)")
         case .failure(let failure):
             error = failure
@@ -259,6 +262,38 @@ final class UsageMonitor: ObservableObject {
 
     private var lastRateLimitAt: Date?
 
+    /// Shows a successful reading: the numbers, a history entry, and a clean slate for rate limits.
+    private func show(_ report: UsageReport) {
+        let fetchedAt = Date()
+        snapshot = report.snapshot
+        lastSuccessAt = fetchedAt
+        error = nil
+        recordHistory(report.snapshot, at: fetchedAt)
+        consecutiveRateLimits = 0
+        lastRateLimitAt = nil
+        cooldown = nil
+    }
+
+    /// Takes a reading that setup already fetched and checked with the credentials it just saved, so connecting
+    /// doesn't need a second request. Call right after credentialsChanged().
+    func adopt(_ report: UsageReport) {
+        lastAttemptAt = Date()
+        show(report)
+        logger.notice("Adopted the reading setup checked, via \(report.route.rawValue, privacy: .public)")
+        scheduleNextRefresh()
+        publishToWidget()
+    }
+
+    /// Whether the keychain holds credentials. A keychain that can't be read counts as yes: the problem is the
+    /// keychain, not missing setup.
+    private static func credentialsPresent(in store: KeychainCredentialStore) -> Bool {
+        do {
+            return !(try store.load()?.isEmpty ?? true)
+        } catch {
+            return true
+        }
+    }
+
     private func recordRateLimit(retryAfter: TimeInterval?) {
         let now = Date()
         consecutiveRateLimits = RateLimitStreak.next(previous: consecutiveRateLimits, lastRateLimitAt: lastRateLimitAt, now: now)
@@ -278,8 +313,10 @@ final class UsageMonitor: ObservableObject {
         let config: WidgetConfig
         do {
             guard let stored = try store.load(), !stored.isEmpty else {
+                hasCredentials = false
                 return FetchOutcome(result: .failure(.noCredentials), generation: nil, usedCredentials: false)
             }
+            hasCredentials = true
             config = stored
         } catch let failure {
             return FetchOutcome(result: .failure(failure as? UsageError ?? .keychain(errSecInternalComponent)),

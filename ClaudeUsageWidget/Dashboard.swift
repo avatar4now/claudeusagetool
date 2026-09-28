@@ -24,6 +24,8 @@ struct Dashboard: View {
                 now: context.date,
                 range: Binding(get: { HistoryRange(rawValue: rangeRaw) ?? .twoWeeks }, set: { rangeRaw = $0.rawValue }),
                 appearance: monitor.appearance,
+                needsSetup: monitor.needsSetup,
+                onSetUp: { openWindow(id: AppWindow.setup) },
                 onRefresh: { Task { await monitor.refresh(trigger: .manual) } },
                 onOpenSettings: { openWindow(id: AppWindow.settings) },
                 onCustomize: {

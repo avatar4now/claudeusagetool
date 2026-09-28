@@ -22,8 +22,9 @@ struct SetupAssistant: View {
                      opensAtLogin: Binding(get: { loginItem.state == .on || loginItem.state == .needsApproval },
                                            set: { loginItem.setEnabled($0) }),
                      loginAvailable: loginItem.isInstalledCopy,
-                     onFindOrganizations: { Task { await model.findOrganizations(monitor: monitor) } },
-                     onConnect: { Task { await model.connect(organizationId: model.chosenOrganizationId, monitor: monitor) } },
+                     onFindOrganizations: { model.lookUp(monitor: monitor) },
+                     onConnect: { model.connectChosen(monitor: monitor) },
+                     onSaveAnyway: { model.saveAnyway(monitor: monitor) },
                      onCustomize: {
                          settingsTab = SettingsTab.appearance.rawValue
                          openWindow(id: AppWindow.settings)
@@ -39,7 +40,7 @@ struct SetupAssistant: View {
                 WindowPresence.opened()
             }
             .onDisappear {
-                model.forgetKey()
+                model.close()
                 WindowPresence.closed()
             }
     }
@@ -56,6 +57,7 @@ struct SetupContent: View {
     let loginAvailable: Bool
     var onFindOrganizations: () -> Void = {}
     var onConnect: () -> Void = {}
+    var onSaveAnyway: () -> Void = {}
     var onCustomize: () -> Void = {}
     var onFinish: () -> Void = {}
 
@@ -151,7 +153,9 @@ struct SetupContent: View {
                             .textFieldStyle(.roundedBorder)
                             .font(.system(.body, design: .monospaced))
                             .onSubmit(onFindOrganizations)
+                            .disabled(model.isWorking)
                         Button("Paste") { model.pasteFromClipboard() }
+                            .disabled(model.isWorking)
                     }
                     keyHint
                 }
@@ -161,6 +165,7 @@ struct SetupContent: View {
             Spacer()
             HStack {
                 Button("Back") { model.step = .welcome }
+                    .disabled(model.isWorking)
                 Spacer()
                 if model.isWorking { ProgressView().controlSize(.small) }
                 Button("Continue", action: onFindOrganizations)
@@ -198,7 +203,9 @@ struct SetupContent: View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Which account should it watch?")
                 .font(.title.bold())
-            Text("Your Claude login belongs to more than one organization. Choose the one whose limits you want to see.")
+            Text(model.organizations.count > 1
+                 ? "Your Claude login belongs to more than one organization. Choose the one whose limits you want to see."
+                 : "Choose the organization whose limits you want to see, or enter its ID.")
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -232,8 +239,14 @@ struct SetupContent: View {
             Spacer()
             HStack {
                 Button("Back") { model.step = .connect }
+                    .disabled(model.isWorking)
                 Spacer()
                 if model.isWorking { ProgressView().controlSize(.small) }
+                if model.canSaveAnyway {
+                    Button("Save Anyway", action: onSaveAnyway)
+                        .help("Save this account now and let the app check it on its next refresh")
+                        .disabled(model.isWorking)
+                }
                 Button("Connect", action: onConnect)
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction)
@@ -263,6 +276,22 @@ struct SetupContent: View {
                 }
                 .padding(12)
                 .background(RoundedRectangle(cornerRadius: 10).fill(Color.primary.opacity(0.04)))
+            }
+
+            if model.savedWithoutCheck || model.removedToken || model.clipboardCleared {
+                VStack(alignment: .leading, spacing: 4) {
+                    if model.savedWithoutCheck {
+                        Label("Saved. The app checks the connection on its next refresh.", systemImage: "clock")
+                    }
+                    if model.removedToken {
+                        Label("Your saved OAuth token was removed, so the app watches this account.", systemImage: "key")
+                    }
+                    if model.clipboardCleared {
+                        Label("Your key was cleared from the clipboard.", systemImage: "doc.on.clipboard")
+                    }
+                }
+                .font(.callout)
+                .foregroundStyle(.secondary)
             }
 
             VStack(alignment: .leading, spacing: 12) {
@@ -356,7 +385,11 @@ final class SetupModel: ObservableObject {
     @Published var step: Step = .welcome
     @Published var browser: Browser = .chromium
     @Published var sessionKey = "" {
-        didSet { if sessionKey != oldValue { clipboardCleared = false } }
+        didSet {
+            guard sessionKey != oldValue else { return }
+            clipboardCleared = false
+            paste.noteChange(from: oldValue, to: sessionKey)
+        }
     }
     @Published private(set) var clipboardCleared = false
     @Published private(set) var organizations: [ClaudeOrganization] = []
@@ -366,6 +399,20 @@ final class SetupModel: ObservableObject {
     @Published private(set) var isWorking = false
     @Published private(set) var problem: String?
     @Published private(set) var problemSymbol = ProblemCause.fallbackSymbol
+    /// True after a temporary problem, when the account can be saved now and checked later.
+    @Published private(set) var canSaveAnyway = false
+    /// True when saving this account removed an OAuth token saved earlier.
+    @Published private(set) var removedToken = false
+    /// True when the account was saved without a successful check.
+    @Published private(set) var savedWithoutCheck = false
+
+    /// The key the organization list was read with. Connecting always uses this copy, never the field,
+    /// which can change while a request is out.
+    private var lookedUpKey: String?
+    /// What to save if the person chooses Save Anyway after a temporary problem.
+    private var pendingSave: (key: String, organizationId: String)?
+    private var paste = PasteTracker()
+    private var work: Task<Void, Never>?
 
     var cleanedKey: String { SessionKeyInput.clean(sessionKey) }
     var keyLooksRight: Bool { SessionKeyInput.looksLikeSessionKey(cleanedKey) }
@@ -373,7 +420,7 @@ final class SetupModel: ObservableObject {
     /// A typed-in ID wins over the list, so a missing or wrong list never blocks setup.
     var chosenOrganizationId: String {
         let typed = manualOrganizationId.trimmingCharacters(in: .whitespacesAndNewlines)
-        return typed.isEmpty ? (selectedOrganization ?? "") : typed
+        return showsManualEntry && !typed.isEmpty ? typed : (selectedOrganization ?? "")
     }
 
     /// Starts on the instructions for the default browser.
@@ -394,95 +441,206 @@ final class SetupModel: ObservableObject {
         let pasteboard = NSPasteboard.general
         guard let text = pasteboard.string(forType: .string) else { return }
         sessionKey = SessionKeyInput.clean(text)
-        if keyLooksRight {
-            pasteboard.clearContents()
+        if keyLooksRight, paste.clearIfUnchanged() {
             clipboardCleared = true
         }
     }
 
-    /// Asks claude.ai which organizations the key belongs to. With one clear choice it connects straight away.
-    func findOrganizations(monitor: UsageMonitor) async {
+    // MARK: Actions
+
+    /// Looks up the organizations for the key in the field, and connects straight away when the choice is clear.
+    func lookUp(monitor: UsageMonitor) {
         guard keyLooksRight, !isWorking else { return }
+        let key = cleanedKey
+        begin { [weak self] in await self?.findOrganizations(key: key, monitor: monitor) }
+    }
+
+    /// Connects the organization chosen or typed in the organization step.
+    func connectChosen(monitor: UsageMonitor) {
+        let organizationId = chosenOrganizationId
+        guard let key = lookedUpKey, !organizationId.isEmpty, !isWorking else { return }
+        begin { [weak self] in await self?.verifyAndSave(key: key, organizationId: organizationId, monitor: monitor) }
+    }
+
+    /// Saves the account after a temporary problem, and lets the app check it on its next refresh.
+    func saveAnyway(monitor: UsageMonitor) {
+        guard let pending = pendingSave, !isWorking else { return }
+        begin { [weak self] in
+            guard let self, self.save(key: pending.key, organizationId: pending.organizationId, monitor: monitor) else { return }
+            self.savedWithoutCheck = true
+            self.finish()
+            Task { await monitor.refresh(trigger: .manual) }
+        }
+    }
+
+    /// Stops anything in flight, clears a pasted key from the clipboard, and forgets the key. Called when the
+    /// window closes, so nothing is saved after the person has left.
+    func close() {
+        work?.cancel()
+        work = nil
+        forgetKey()
+        _ = paste.clearIfUnchanged()
+    }
+
+    /// Drops the typed key from memory.
+    func forgetKey() {
+        sessionKey = ""
+        lookedUpKey = nil
+        pendingSave = nil
+    }
+
+    // MARK: Steps
+
+    private func begin(_ operation: @escaping @MainActor () async -> Void) {
+        work?.cancel()
         isWorking = true
         problem = nil
-        let result = await UsageFetcher.live.organizations(sessionKey: cleanedKey)
-        isWorking = false
+        canSaveAnyway = false
+        work = Task { [weak self] in
+            await operation()
+            self?.isWorking = false
+        }
+    }
+
+    private func findOrganizations(key: String, monitor: UsageMonitor) async {
+        manualOrganizationId = ""
+        showsManualEntry = false
+        let result = await UsageFetcher.live.organizations(sessionKey: key)
+        guard !Task.isCancelled else { return }
+        lookedUpKey = key
         switch result {
         case .success(let found):
             logger.notice("Setup found \(found.count, privacy: .public) organizations")
             organizations = found
+            selectedOrganization = OrganizationParser.bestGuess(found)?.id
+                ?? found.first(where: { $0.canChat == true })?.id ?? found.first?.id
             if let guess = OrganizationParser.bestGuess(found) {
-                selectedOrganization = guess.id
-                await connect(organizationId: guess.id, monitor: monitor)
+                await verifyAndSave(key: key, organizationId: guess.id, monitor: monitor)
+                // If the automatic choice didn't work, show the choices and the manual entry.
+                if step != .finish, lookedUpKey != nil { step = .organization }
             } else {
-                selectedOrganization = found.first(where: { $0.canChat == true })?.id ?? found.first?.id
                 showsManualEntry = found.isEmpty
                 step = .organization
             }
         case .failure(let error):
             logger.error("Setup couldn't list organizations: \(error.message, privacy: .public)")
             show(error)
+            if ProblemCause(error) == .signIn || error == .invalidCredentials {
+                lookedUpKey = nil
+            } else {
+                // The list couldn't be read, but the ID can still be typed in by hand.
+                organizations = []
+                showsManualEntry = true
+                step = .organization
+            }
         }
     }
 
-    /// Saves the key and organization in the keychain, then checks the connection with a real reading.
-    func connect(organizationId: String, monitor: UsageMonitor) async {
-        guard !isWorking else { return }
-        isWorking = true
-        problem = nil
-        defer { isWorking = false }
+    /// Checks the new account on its own, with no OAuth token, before replacing anything already saved.
+    private func verifyAndSave(key: String, organizationId: String, monitor: UsageMonitor) async {
+        guard SessionKeyInput.looksLikeSessionKey(key) else {
+            show(.invalidCredentials)
+            return
+        }
+        let config: WidgetConfig
         do {
-            // Setup only changes the session key and organization; an OAuth token saved earlier stays.
-            let existing = try? monitor.store.load()
-            _ = try ConfigEditor.save(oauthToken: existing?.oauthToken ?? "", sessionKey: cleanedKey,
-                                      organizationId: organizationId, store: monitor.store)
-            monitor.credentialsChanged()
-            WidgetCenter.shared.reloadAllTimelines()
+            config = try WidgetConfig.fromFields(oauthToken: "", sessionKey: key, organizationId: organizationId)
         } catch let error as ConfigValidationError {
             problem = error.message
             problemSymbol = ProblemCause.setup.symbol
             return
-        } catch let error as UsageError {
-            show(error)
-            return
         } catch {
-            problem = "Couldn't save to your keychain."
-            problemSymbol = ProblemCause.keychain.symbol
+            show(.invalidCredentials)
             return
         }
-
-        switch await monitor.refresh(trigger: .connectionTest) {
-        case .success:
-            logger.notice("Setup connected")
-            forgetKey()
-            step = .finish
+        let result = await UsageFetcher.live.fetch(config: config)
+        guard !Task.isCancelled else { return }
+        switch result {
+        case .success(let report):
+            guard save(key: key, organizationId: organizationId, monitor: monitor) else { return }
+            monitor.adopt(report)
+            finish()
         case .failure(let error):
             logger.error("Setup's connection check failed: \(error.message, privacy: .public)")
             show(error)
+            pendingSave = (key, organizationId)
+            canSaveAnyway = SetupMessages.canSaveAnyway(after: error)
+            if ProblemCause(error) == .signIn {
+                // The key itself was refused, so go back to where it's entered.
+                lookedUpKey = nil
+                pendingSave = nil
+                step = .connect
+            }
         }
     }
 
-    /// Drops the typed key from memory once it's saved, or when the window closes.
-    func forgetKey() {
-        sessionKey = ""
+    /// Saves the account in place of whatever was saved. A saved OAuth token goes too: the app always tries a token
+    /// first, so it would keep showing that token's account.
+    private func save(key: String, organizationId: String, monitor: UsageMonitor) -> Bool {
+        let existing = try? monitor.store.load()
+        do {
+            _ = try ConfigEditor.save(oauthToken: "", sessionKey: key, organizationId: organizationId, store: monitor.store)
+        } catch let error as ConfigValidationError {
+            problem = error.message
+            problemSymbol = ProblemCause.setup.symbol
+            return false
+        } catch let error as UsageError {
+            show(error)
+            return false
+        } catch {
+            show(.keychain(errSecIO))
+            return false
+        }
+        removedToken = existing?.oauthToken != nil
+        monitor.credentialsChanged()
+        WidgetCenter.shared.reloadAllTimelines()
+        return true
+    }
+
+    private func finish() {
+        logger.notice("Setup connected")
+        forgetKey()
+        if paste.clearIfUnchanged() { clipboardCleared = true }
+        step = .finish
     }
 
     private func show(_ error: UsageError) {
-        let cause = ProblemCause(error)
-        problem = "\(cause.title). \(error.message)"
-        problemSymbol = cause.symbol
+        problem = SetupMessages.text(for: error)
+        problemSymbol = ProblemCause(error).symbol
+    }
+}
+
+/// Remembers when a whole key was pasted into a field, so the clipboard can be cleared afterwards without ever
+/// reading it: it's cleared only if nothing else was copied since.
+struct PasteTracker {
+    private var changeCount: Int?
+
+    mutating func noteChange(from old: String, to new: String) {
+        let arrivedAtOnce = new.count - old.count > 16
+        if arrivedAtOnce, SessionKeyInput.looksLikeSessionKey(SessionKeyInput.clean(new)) {
+            changeCount = NSPasteboard.general.changeCount
+        }
+    }
+
+    /// Clears the clipboard if it still holds what was pasted. Returns true when it did.
+    mutating func clearIfUnchanged() -> Bool {
+        defer { changeCount = nil }
+        guard let changeCount, NSPasteboard.general.changeCount == changeCount else { return false }
+        NSPasteboard.general.clearContents()
+        return true
     }
 }
 
 extension SetupModel {
     /// A model at one step with made-up content, for previews and offscreen checks. It never holds a real key.
     static func preview(step: Step, organizations: [ClaudeOrganization] = [], problem: String? = nil,
-                        sampleKey: Bool = false) -> SetupModel {
+                        sampleKey: Bool = false, canSaveAnyway: Bool = false) -> SetupModel {
         let model = SetupModel()
         model.step = step
         model.organizations = organizations
         model.selectedOrganization = organizations.first?.id
         model.problem = problem
+        model.canSaveAnyway = canSaveAnyway
         if sampleKey { model.sessionKey = "sk-ant-sid01-" + String(repeating: "x", count: 40) }
         return model
     }

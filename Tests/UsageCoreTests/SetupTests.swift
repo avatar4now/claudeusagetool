@@ -104,4 +104,29 @@ final class SetupTests: XCTestCase {
         XCTAssertFalse(SessionKeyInput.looksLikeSessionKey("hello"))
         XCTAssertFalse(SessionKeyInput.looksLikeSessionKey(""))
     }
+
+    // MARK: Setup's own wording
+
+    func testSetupExplainsProblemsInItsOwnWords() {
+        XCTAssertTrue(SetupMessages.text(for: .sessionKeyRejected).contains("didn't accept this key"))
+        XCTAssertTrue(SetupMessages.text(for: .network).contains("Couldn't reach claude.ai"))
+        XCTAssertTrue(SetupMessages.text(for: .rateLimited(retryAfter: 60)).contains("slow down"))
+        XCTAssertTrue(SetupMessages.text(for: .blockedByCloudflare).contains("bot check"))
+        XCTAssertTrue(SetupMessages.text(for: .invalidOrganizationId).contains("organization"))
+        for error in [UsageError.network, .rateLimited(retryAfter: nil), .http(500), .accessDenied(403), .invalidResponse,
+                      .blockedByCloudflare, .sessionKeyRejected, .invalidCredentials, .keychain(-25300)] {
+            let text = SetupMessages.text(for: error)
+            XCTAssertFalse(text.contains("Retrying later") || text.contains("Waiting before trying again"),
+                           "setup never retries by itself, so it never says it will: \(text)")
+        }
+    }
+
+    func testOnlyTemporaryProblemsOfferSavingAnyway() {
+        XCTAssertTrue(SetupMessages.canSaveAnyway(after: .network))
+        XCTAssertTrue(SetupMessages.canSaveAnyway(after: .rateLimited(retryAfter: nil)))
+        XCTAssertTrue(SetupMessages.canSaveAnyway(after: .blockedByCloudflare))
+        XCTAssertFalse(SetupMessages.canSaveAnyway(after: .sessionKeyRejected), "a rejected key shouldn't be saved")
+        XCTAssertFalse(SetupMessages.canSaveAnyway(after: .invalidOrganizationId))
+        XCTAssertFalse(SetupMessages.canSaveAnyway(after: .keychain(-25300)))
+    }
 }

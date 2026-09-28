@@ -21,7 +21,7 @@ struct UsageMenu: View {
                 version: AppVersion.current.shortText,
                 now: context.date,
                 appearance: monitor.appearance,
-                needsSetup: !monitor.hasCredentials,
+                needsSetup: monitor.needsSetup,
                 onSetUp: {
                     openWindow(id: AppWindow.setup)
                     NSApplication.shared.activate()

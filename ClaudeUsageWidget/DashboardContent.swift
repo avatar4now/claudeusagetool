@@ -39,6 +39,9 @@ struct DashboardContent: View {
     var calendar: Calendar = .current
     @Binding var range: HistoryRange
     var appearance: Appearance = .standard
+    /// True when no account is connected yet.
+    var needsSetup = false
+    var onSetUp: () -> Void = {}
     var onRefresh: () -> Void = {}
     var onOpenSettings: () -> Void = {}
     var onCustomize: () -> Void = {}
@@ -80,19 +83,22 @@ struct DashboardContent: View {
         return VStack(alignment: .leading, spacing: 18) {
             header
             problems
-            HStack(alignment: .top, spacing: 14) {
-                ForEach(visibleLimits, id: \.self) { kind in
-                    if let display = displays[kind] {
-                        DashboardLimitCard(display: display, dimmed: isStale,
-                                           trend: UsageHistoryAnalysis.currentWindow(samples, kind: kind,
-                                                                                     resetsAt: snapshot?.resetsAt(for: kind), now: now),
-                                           seriesColor: palette.series(for: kind).color)
+            // Before an account is connected there's nothing to show here, so the setup card stands alone.
+            if !needsSetup {
+                HStack(alignment: .top, spacing: 14) {
+                    ForEach(visibleLimits, id: \.self) { kind in
+                        if let display = displays[kind] {
+                            DashboardLimitCard(display: display, dimmed: isStale,
+                                               trend: UsageHistoryAnalysis.currentWindow(samples, kind: kind,
+                                                                                         resetsAt: snapshot?.resetsAt(for: kind), now: now),
+                                               seriesColor: palette.series(for: kind).color)
+                        }
                     }
                 }
+                ForecastCard(rows: visibleLimits.map { kind in
+                    ForecastRow.make(outcomes[kind] ?? .unavailable, kind: kind, now: now, calendar: calendar)
+                }, palette: palette)
             }
-            ForecastCard(rows: visibleLimits.map { kind in
-                ForecastRow.make(outcomes[kind] ?? .unavailable, kind: kind, now: now, calendar: calendar)
-            }, palette: palette)
             dailyCard(days: days)
             HStack(alignment: .top, spacing: 18) {
                 thisWeekCard(forecasts: outcomes)
@@ -129,11 +135,30 @@ struct DashboardContent: View {
 
     @ViewBuilder
     private var problems: some View {
+        if needsSetup {
+            HStack(spacing: 14) {
+                Image(systemName: "person.crop.circle.badge.plus")
+                    .font(.largeTitle)
+                    .foregroundStyle(.tint)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Connect your Claude account")
+                        .font(.headline)
+                    Text("The setup assistant walks you through it in a few steps.")
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Set Up…", action: onSetUp)
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+            }
+            .padding(16)
+            .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color.accentColor.opacity(0.08)))
+        }
         if let cooldown, cooldown.until > now {
             Label("Rate limited. Next try at \(cooldown.until.formatted(date: .omitted, time: .shortened)).", systemImage: "hourglass")
                 .foregroundStyle(.orange)
         }
-        if let error, !(cooldown.map { $0.until > now } ?? false && error.isRateLimited) {
+        if let error, !needsSetup, !(cooldown.map { $0.until > now } ?? false && error.isRateLimited) {
             Label(error.message, systemImage: ProblemCause(error).symbol)
                 .foregroundStyle(.orange)
         }
@@ -211,10 +236,12 @@ struct DashboardContent: View {
     // MARK: When you use Claude
 
     private var rhythmCard: some View {
-        let cells = UsageHistoryAnalysis.hourlyRhythm(samples, days: range.days, endingOn: now, calendar: calendar)
+        // Whole weeks only, so every weekday is counted the same number of times.
+        let weeks = max(1, range.days / 7)
+        let cells = UsageHistoryAnalysis.hourlyRhythm(samples, days: weeks * 7, endingOn: now, calendar: calendar)
         return DashboardCard {
             CardTitle("When you use Claude", systemImage: "square.grid.3x3.fill",
-                      caption: "Weekly limit points used in each hour, over the last \(range.title). Hover for details.")
+                      caption: "Weekly limit points used in each hour, over the last \(weeks) weeks. Hover for details.")
             if cells.allSatisfy({ $0.points == 0 }) {
                 EmptyHistory(isHistoryEnabled: isHistoryEnabled)
                     .frame(height: 190)

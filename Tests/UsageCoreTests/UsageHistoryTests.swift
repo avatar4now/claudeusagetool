@@ -237,4 +237,16 @@ final class UsageHistoryTests: XCTestCase {
         XCTAssertEqual(UsageHistoryAnalysis.currentWindow(samples, kind: .fiveHour, resetsAt: nil, now: at(14, 16)), [])
         XCTAssertEqual(UsageHistoryAnalysis.currentWindow(samples, kind: .weekly, resetsAt: at(18, 12), now: at(14, 16)).map(\.value), [50])
     }
+
+    func testFlatStretchesKeepOnlyTheirEnds() {
+        func points(_ values: [Double]) -> [SeriesPoint] {
+            values.enumerated().map { SeriesPoint(at: at(14, 9, $0.offset), value: $0.element) }
+        }
+        let thinned = UsageHistoryAnalysis.withoutFlatMiddles(points([1, 1, 1, 2, 2, 3, 3, 3, 3]))
+        XCTAssertEqual(thinned.map(\.value), [1, 1, 2, 2, 3, 3], "the first and last reading of each flat stretch stay")
+        XCTAssertEqual(thinned.map(\.at), [at(14, 9, 0), at(14, 9, 2), at(14, 9, 3), at(14, 9, 4), at(14, 9, 5), at(14, 9, 8)])
+        XCTAssertEqual(UsageHistoryAnalysis.withoutFlatMiddles(points([5])).map(\.value), [5])
+        XCTAssertEqual(UsageHistoryAnalysis.withoutFlatMiddles(points([])).count, 0)
+        XCTAssertEqual(UsageHistoryAnalysis.withoutFlatMiddles(points([1, 2, 3])).map(\.value), [1, 2, 3])
+    }
 }

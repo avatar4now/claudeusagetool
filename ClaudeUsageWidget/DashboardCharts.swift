@@ -89,9 +89,10 @@ struct DailyUsageChart: View {
     }
 
     var body: some View {
+        let selected = selectedDay
         Chart {
             ForEach(days) { day in
-                let faded = selectedDay != nil && selectedDay?.day != day.day
+                let faded = selected != nil && selected?.day != day.day
                 BarMark(x: .value("Day", day.day, unit: .day), y: .value("Points", day.weeklyPoints))
                     .foregroundStyle(by: .value("Limit", "All models"))
                     .position(by: .value("Limit", "All models"))
@@ -125,7 +126,7 @@ struct DailyUsageChart: View {
                             .foregroundStyle(.tertiary)
                     }
             }
-            if let day = selectedDay {
+            if let day = selected {
                 RuleMark(x: .value("Day", day.day, unit: .day))
                     .foregroundStyle(Color.clear)
                     .annotation(position: .top, spacing: 0,
@@ -186,8 +187,18 @@ struct WeekChart: View {
     @State private var selection: Date?
 
     private var palette: Palette { appearance.palette }
-    private var weeklyPoints: [WeekPoint] { week.points.filter { $0.weekly != nil } }
-    private var fablePoints: [WeekPoint] { showFable ? week.points.filter { $0.fable != nil } : [] }
+
+    /// Each line without the readings in the middle of flat stretches: the same shape with far fewer marks.
+    private var weeklySeries: [SeriesPoint] {
+        UsageHistoryAnalysis.withoutFlatMiddles(week.points.compactMap { point in point.weekly.map { SeriesPoint(at: point.at, value: $0) } })
+    }
+    private var fableSeries: [SeriesPoint] {
+        guard showFable else { return [] }
+        return UsageHistoryAnalysis.withoutFlatMiddles(week.points.compactMap { point in point.fable.map { SeriesPoint(at: point.at, value: $0) } })
+    }
+
+    /// "used" is spelled out when the rest of the app shows what's left, so the two can't be confused.
+    private var usedSuffix: String { appearance.numbers == .left ? " used" : "" }
 
     private var hasProjection: Bool {
         !weeklyProjection.isEmpty || (showFable && !fableProjection.isEmpty)
@@ -209,7 +220,9 @@ struct WeekChart: View {
     }
 
     private var chart: some View {
-        Chart {
+        let weeklyPoints = weeklySeries
+        let fablePoints = fableSeries
+        return Chart {
             if appearance.showPaceGuides {
                 LineMark(x: .value("Time", week.start), y: .value("Percent", 0), series: .value("Line", "Even pace"))
                     .foregroundStyle(Color.secondary)
@@ -221,24 +234,24 @@ struct WeekChart: View {
 
             ForEach(weeklyPoints) { point in
                 if appearance.shadeCharts {
-                    AreaMark(x: .value("Time", point.at), y: .value("Percent", point.weekly ?? 0),
+                    AreaMark(x: .value("Time", point.at), y: .value("Percent", point.value),
                              series: .value("Area", "All models"), stacking: .unstacked)
                         .foregroundStyle(fade(palette.allModels.color))
                         .interpolationMethod(.monotone)
                 }
-                LineMark(x: .value("Time", point.at), y: .value("Percent", point.weekly ?? 0), series: .value("Line", "All models"))
+                LineMark(x: .value("Time", point.at), y: .value("Percent", point.value), series: .value("Line", "All models"))
                     .foregroundStyle(palette.allModels.color)
                     .lineStyle(StrokeStyle(lineWidth: 2.2))
                     .interpolationMethod(.monotone)
             }
             ForEach(fablePoints) { point in
                 if appearance.shadeCharts {
-                    AreaMark(x: .value("Time", point.at), y: .value("Percent", point.fable ?? 0),
+                    AreaMark(x: .value("Time", point.at), y: .value("Percent", point.value),
                              series: .value("Area", "Fable"), stacking: .unstacked)
                         .foregroundStyle(fade(palette.fable.color))
                         .interpolationMethod(.monotone)
                 }
-                LineMark(x: .value("Time", point.at), y: .value("Percent", point.fable ?? 0), series: .value("Line", "Fable"))
+                LineMark(x: .value("Time", point.at), y: .value("Percent", point.value), series: .value("Line", "Fable"))
                     .foregroundStyle(palette.fable.color)
                     .lineStyle(StrokeStyle(lineWidth: 2.2))
                     .interpolationMethod(.monotone)
@@ -306,10 +319,10 @@ struct WeekChart: View {
     private func calloutLines(for point: WeekPoint) -> [CalloutLine] {
         var lines: [CalloutLine] = []
         if let weekly = point.weekly {
-            lines.append(CalloutLine(color: palette.allModels.color, text: "All models · \(Int(weekly.rounded(.down)))%"))
+            lines.append(CalloutLine(color: palette.allModels.color, text: "All models · \(Int(weekly.rounded(.down)))%\(usedSuffix)"))
         }
         if showFable, let fable = point.fable {
-            lines.append(CalloutLine(color: palette.fable.color, text: "Fable · \(Int(fable.rounded(.down)))%"))
+            lines.append(CalloutLine(color: palette.fable.color, text: "Fable · \(Int(fable.rounded(.down)))%\(usedSuffix)"))
         }
         if appearance.showPaceGuides {
             let elapsed = point.at.timeIntervalSince(week.start) / week.end.timeIntervalSince(week.start)
@@ -378,7 +391,8 @@ struct FiveHourChart: View {
                     .annotation(position: .top, spacing: 0,
                                 overflowResolution: .init(x: .fit(to: .chart), y: .disabled)) {
                         ChartCallout(title: point.at.formatted(date: .omitted, time: .shortened),
-                                     lines: [CalloutLine(color: color, text: "5-hour · \(Int(point.value.rounded(.down)))%")])
+                                     lines: [CalloutLine(color: color, text: "5-hour · \(Int(point.value.rounded(.down)))%"
+                                                             + (appearance.numbers == .left ? " used" : ""))])
                     }
                 PointMark(x: .value("Time", point.at), y: .value("Percent", point.value))
                     .foregroundStyle(color)
@@ -411,7 +425,8 @@ struct RhythmChart: View {
     let cells: [RhythmCell]
     let calendar: Calendar
     let color: Color
-    @State private var hovered: RhythmCell?
+    /// Which square the pointer is over, by position, so a new reading in that hour doesn't lose the hover.
+    @State private var hoveredID: Int?
 
     /// Weekdays in the order this Mac's calendar starts its week.
     private var weekdays: [Int] {
@@ -470,16 +485,16 @@ struct RhythmChart: View {
                                 .frame(maxWidth: .infinity)
                                 .frame(height: 20)
                                 .overlay {
-                                    if hovered == cell {
+                                    if hoveredID == cell.id {
                                         RoundedRectangle(cornerRadius: 3, style: .continuous)
                                             .strokeBorder(Color.primary.opacity(0.8), lineWidth: 1.5)
                                     }
                                 }
                                 .onHover { inside in
                                     if inside {
-                                        hovered = cell
-                                    } else if hovered == cell {
-                                        hovered = nil
+                                        hoveredID = cell.id
+                                    } else if hoveredID == cell.id {
+                                        hoveredID = nil
                                     }
                                 }
                         }
@@ -502,7 +517,7 @@ struct RhythmChart: View {
     }
 
     private var summary: String {
-        if let hovered {
+        if let hoveredID, let hovered = cells.first(where: { $0.id == hoveredID }) {
             return "\(dayName(hovered.weekday)) \(hourName(hovered.hour)) · \(Int(hovered.points.rounded())) pts"
         }
         if let busiest {

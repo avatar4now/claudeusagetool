@@ -157,10 +157,13 @@ struct ThemePicker: View {
         LabeledContent("Theme") {
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 3), spacing: 10) {
                 ForEach(ColorTheme.allCases) { theme in
-                    ThemeSwatch(theme: theme, isSelected: theme == selection)
-                        .onTapGesture { selection = theme }
-                        .accessibilityAddTraits(.isButton)
-                        .accessibilityAddTraits(theme == selection ? .isSelected : [])
+                    Button {
+                        selection = theme
+                    } label: {
+                        ThemeSwatch(theme: theme, isSelected: theme == selection)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityAddTraits(theme == selection ? .isSelected : [])
                 }
             }
         }

@@ -13,6 +13,10 @@ struct SettingsView: View {
     @ObservedObject var updates: UpdateChecker
 
     @State private var sessionKey = ""
+    /// Notices a pasted key, so the clipboard can be cleared once it's saved.
+    @State private var paste = PasteTracker()
+    /// The key as loaded from the keychain; showing it isn't a paste.
+    @State private var loadedKey = ""
     @State private var organizationId = ""
     @State private var oauthToken = ""
     @State private var statusMessage = ""
@@ -54,6 +58,11 @@ struct SettingsView: View {
             WindowPresence.closed()
         }
         .onChange(of: monitor.historyRevision) { updateHistorySummary() }
+        // Setup can save new credentials while this window is open; show them, so Save can't bring back old ones.
+        .onChange(of: monitor.credentialsRevision) { loadConfig() }
+        .onChange(of: sessionKey) { old, new in
+            if new != loadedKey { paste.noteChange(from: old, to: new) }
+        }
     }
 
     // MARK: Account
@@ -368,6 +377,7 @@ struct SettingsView: View {
             WidgetCenter.shared.reloadAllTimelines()
             switch outcome {
             case .saved:
+                _ = paste.clearIfUnchanged()
                 Task { await checkConnection(afterSave: true) }
             case .cleared:
                 statusMessage = "Credentials removed from your keychain."
@@ -410,7 +420,8 @@ struct SettingsView: View {
         do {
             let config = try monitor.store.load() ?? WidgetConfig()
             oauthToken = config.oauthToken ?? ""
-            sessionKey = config.sessionKey ?? ""
+            loadedKey = config.sessionKey ?? ""
+            sessionKey = loadedKey
             organizationId = config.organizationId ?? ""
         } catch let error as UsageError {
             statusMessage = error.message

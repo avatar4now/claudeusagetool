@@ -71,3 +71,36 @@ extension UsageFetcher {
         }
     }
 }
+
+/// What setup says when something goes wrong. Setup never retries by itself, so it never promises to.
+enum SetupMessages {
+    static func text(for error: UsageError) -> String {
+        switch error {
+        case .sessionKeyRejected, .tokenRejected:
+            return "claude.ai didn't accept this key. Sign in to claude.ai again, then copy the new sessionKey."
+        case .invalidCredentials:
+            return "That doesn't look like a complete session key. Copy the whole value of sessionKey and paste it again."
+        case .invalidOrganizationId, .noCredentials:
+            return "That organization ID didn't work. Choose another organization, or check the ID you entered."
+        case .rateLimited:
+            return "claude.ai asked the app to slow down. Wait a minute and try again, or save now and let the app check later."
+        case .network:
+            return "Couldn't reach claude.ai. Check your internet connection, then try again."
+        case .blockedByCloudflare:
+            return "claude.ai showed a bot check. Open claude.ai in your browser, then try again."
+        case .keychain:
+            return "Couldn't save to your keychain. Try again, or restart your Mac if it keeps happening."
+        case .fallbackFailed(_, let session):
+            return text(for: session)
+        case .tokenCannotReadUsage, .accessDenied, .http, .invalidResponse, .redirected, .requestBlocked:
+            return "claude.ai answered in an unexpected way. Try again in a minute."
+        }
+    }
+
+    /// Temporary problems can be saved anyway and checked later. A rejected key, a wrong organization, or a keychain
+    /// failure can't.
+    static func canSaveAnyway(after error: UsageError) -> Bool {
+        RefreshPolicy.keepsLastReport(after: error) && ProblemCause(error) != .keychain
+            && error != .redirected && error != .requestBlocked
+    }
+}

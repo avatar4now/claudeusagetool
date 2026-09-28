@@ -218,6 +218,19 @@ enum UsageHistoryAnalysis {
             .compactMap { sample in sample.value(for: kind).map { SeriesPoint(at: sample.at, value: $0) } }
     }
 
+    /// Drops readings in the middle of a flat stretch. The first and last reading of each stretch stay, so a line
+    /// drawn through what's left has the same shape, with far fewer points to draw.
+    static func withoutFlatMiddles(_ points: [SeriesPoint]) -> [SeriesPoint] {
+        guard points.count > 2 else { return points }
+        return points.indices.compactMap { index in
+            let value = points[index].value
+            let isEnd = index == points.startIndex || index == points.index(before: points.endIndex)
+            let changesBefore = !isEnd && points[index - 1].value != value
+            let changesAfter = !isEnd && points[index + 1].value != value
+            return isEnd || changesBefore || changesAfter ? points[index] : nil
+        }
+    }
+
     /// When the weekly limit reset between `from` and `to`, judged from the reset times the readings reported.
     /// Reset times within a few minutes of each other are the same reset.
     static func weeklyResets(_ samples: [UsageSample], from: Date, to: Date) -> [Date] {
