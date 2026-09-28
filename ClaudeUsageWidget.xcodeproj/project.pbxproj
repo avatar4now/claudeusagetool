@@ -41,6 +41,7 @@
 		A1B2C3D12F700001000000AA /* ClaudeUsageWidgetExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = ClaudeUsageWidgetExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		A1B2C3D32F700001000000AA /* WidgetKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WidgetKit.framework; path = System/Library/Frameworks/WidgetKit.framework; sourceTree = SDKROOT; };
 		A1B2C3D52F700001000000AA /* SwiftUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SwiftUI.framework; path = System/Library/Frameworks/SwiftUI.framework; sourceTree = SDKROOT; };
+		A1B2C3FA2F7000CF000000AA /* Signing.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = Signing.xcconfig; path = Config/Signing.xcconfig; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -107,6 +108,7 @@
 		A1B2C3B62F700000000000AA = {
 			isa = PBXGroup;
 			children = (
+				A1B2C3FA2F7000CF000000AA /* Signing.xcconfig */,
 				A1B2C3F12F700003000000AA /* Shared */,
 				A1B2C3C12F700000000000AA /* ClaudeUsageWidget */,
 				A1B2C3D72F700001000000AA /* ClaudeUsageWidgetExtension */,
@@ -267,6 +269,7 @@
 /* Begin XCBuildConfiguration section */
 		A1B2C3C82F700000000000AA /* Debug */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = A1B2C3FA2F7000CF000000AA /* Signing.xcconfig */;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
@@ -328,6 +331,7 @@
 		};
 		A1B2C3C92F700000000000AA /* Release */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = A1B2C3FA2F7000CF000000AA /* Signing.xcconfig */;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
@@ -393,7 +397,6 @@
 				CUW_BUILD_BRANCH = "";
 				CUW_BUILD_COMMIT = "";
 				CUW_BUILD_DATE = "";
-				DEVELOPMENT_TEAM = "";
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -426,7 +429,6 @@
 				CUW_BUILD_BRANCH = "";
 				CUW_BUILD_COMMIT = "";
 				CUW_BUILD_DATE = "";
-				DEVELOPMENT_TEAM = "";
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -457,7 +459,6 @@
 				CODE_SIGN_ENTITLEMENTS = ClaudeUsageWidgetExtension/ClaudeUsageWidgetExtension.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 5;
-				DEVELOPMENT_TEAM = "";
 				ENABLE_APP_SANDBOX = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = ClaudeUsageWidgetExtension/Info.plist;
@@ -490,7 +491,6 @@
 				CODE_SIGN_ENTITLEMENTS = ClaudeUsageWidgetExtension/ClaudeUsageWidgetExtension.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 5;
-				DEVELOPMENT_TEAM = "";
 				ENABLE_APP_SANDBOX = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = ClaudeUsageWidgetExtension/Info.plist;

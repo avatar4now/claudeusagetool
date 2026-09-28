@@ -19,3 +19,11 @@ claude-usage-widget.json
 # Swift Package Manager
 .build/
 .swiftpm/
+
+# Your Apple signing team, created by scripts/update-app.sh. Never published.
+Config/Signing.local.xcconfig
+
+# Local notes and settings from Claude Code sessions. Never published.
+claude/
+.claude/
+.remember/

@@ -1,3 +1,6 @@
+> **注意：** 这份中文说明来自原项目，可能已经过时。最新的安装和使用说明请看 [README.md](README.md)。
+> This Chinese guide comes from the original project and may be out of date. See [README.md](README.md) for current instructions.
+
 # ClaudeUsageWidget
 
 macOS 桌面小组件（WidgetKit），实时监控你的 Claude AI 用量限制。

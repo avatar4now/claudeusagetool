@@ -1,136 +1,87 @@
-# ClaudeUsageWidget
+# Claude Usage Tool
 
-A macOS desktop widget (WidgetKit) that monitors your Claude AI usage limits in real-time.
+A macOS menu bar app, desktop widget, and dashboard that show how much of your Claude plan limits you've used: the 5-hour session, the weekly limit, and model-specific weekly limits such as Fable.
 
 ![macOS](https://img.shields.io/badge/macOS-15.0+-blue)
-![Swift](https://img.shields.io/badge/Swift-5.0-orange)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
-[中文文档](README_CN.md)
+Based on [ClaudeUsageWidget](https://github.com/dependentsign/ClaudeUsageWidget) by Huan Ma, under the MIT license.
 
-## Screenshots
+## What you get
 
-![ClaudeUsageWidget Preview](screenshots/widget-preview.png)
+- **Menu bar:** the limit closest to full, such as `F 94%`, with a warning when another limit is nearly used up.
+- **Desktop widget:** small, medium, and large sizes, with pace markers and reset times.
+- **Dashboard:** current limits, a forecast of when each limit runs out, usage per day, this week's trend, and the last 24 hours of 5-hour sessions.
+- **Private by design:** your session key stays in your Mac's login keychain and is sent only to claude.ai. Usage history stays on your Mac.
 
-## Features
+## Install
 
-- **5-hour session usage** with progress bar
-- **Weekly usage** with progress bar
-- **Reset countdown** for both windows
-- **Color-coded** green → yellow → orange → red
-- **Three widget sizes** — small, medium, large
-- **Dual auth** — OAuth token or session key
-- **Auto-refresh** every 5 minutes
+You build the app yourself on your Mac. It's free and takes a few minutes.
 
----
+**You need**
 
-## Quick Install with Claude Code
+- macOS 15 or later
+- Xcode 16 or later, free from the Mac App Store
+- A Claude plan with usage limits, such as Pro or Max
 
-Paste this into your Claude Code session:
+**Steps**
 
-```
-Clone https://github.com/dependentsign/ClaudeUsageWidget and build it for me.
+1. Open Xcode once. In **Xcode → Settings → Accounts**, add your Apple ID. A free Apple account works.
+2. In Terminal, run:
 
-Steps:
-1. git clone https://github.com/dependentsign/ClaudeUsageWidget.git ~/Documents/ClaudeUsageWidget
-2. Open the .xcodeproj and set your Development Team in Xcode, or update DEVELOPMENT_TEAM in project.pbxproj
-3. Build: xcodebuild -project ~/Documents/ClaudeUsageWidget/ClaudeUsageWidget.xcodeproj -scheme ClaudeUsageWidget -destination 'platform=macOS' build
-4. Install: run scripts/update-app.sh, which runs the tests, builds, checks signatures, and installs the app to ~/Applications
-5. Open the app and enter my claude.ai session key and organization ID in its Settings window (they are stored in the macOS login keychain)
-6. Open the app: open /Applications/ClaudeUsageWidget.app
-7. Tell me to right-click desktop → Edit Widgets → search "Claude" to add it
-```
+   ```bash
+   git clone https://github.com/avatar4now/claudeusagetool.git ~/ClaudeUsageTool
+   cd ~/ClaudeUsageTool
+   scripts/update-app.sh
+   ```
 
----
+   The script finds your signing team, runs the tests, builds the app, and installs it in `~/Applications`.
 
-## Manual Setup
+   Prefer Claude Code? Ask it: *"Clone https://github.com/avatar4now/claudeusagetool into ~/ClaudeUsageTool and run scripts/update-app.sh."*
 
-### 1. Build
+3. Open **Claude Usage Widget** and connect your account in the window that opens.
+4. To add the widget, right-click the desktop, choose **Edit Widgets**, and search for **Claude Usage**.
 
-```bash
-git clone https://github.com/dependentsign/ClaudeUsageWidget.git
-cd ClaudeUsageWidget
-open ClaudeUsageWidget.xcodeproj
-```
+> Keep the project out of iCloud-synced folders such as Documents or Desktop. iCloud can restore deleted files and break the build.
 
-In Xcode:
-- Select your **Development Team** in both targets (ClaudeUsageWidget + ClaudeUsageWidgetExtension)
-- Update **Bundle Identifier** if needed
-- Build & Run (⌘R)
+## Connect your account
 
-### 2. Install and Configure Credentials
+The app reads your usage the same way claude.ai's own Usage page does, using your browser session.
 
-Run the update script. It runs the tests, builds a Release copy, checks the signatures, and installs it to `~/Applications`:
+1. Sign in to [claude.ai](https://claude.ai) in your browser.
+2. Open your browser's developer tools and find the cookie named `sessionKey`:
+   - **Chrome, Arc, Edge, Brave:** View → Developer → Developer Tools → Application → Cookies → https://claude.ai
+   - **Safari:** first turn on Settings → Advanced → Show features for web developers, then Develop → Show Web Inspector → Storage → Cookies
+   - **Firefox:** Tools → Browser Tools → Web Developer Tools → Storage → Cookies
+3. Paste the key into the app, then paste your organization ID from [claude.ai/api/organizations](https://claude.ai/api/organizations) (the `uuid` value).
+4. Click **Save Configuration**. The app checks the connection right away.
+
+## Update
 
 ```bash
+cd ~/ClaudeUsageTool
+git pull
 scripts/update-app.sh
 ```
 
-Open **Claude Usage Widget**. The Settings window opens on first launch. Enter your credentials there; they are stored in your macOS login keychain, readable only by this app and its widget.
+Your settings, history, and saved key carry over.
 
-**Session key (recommended)**
+## Privacy and security
 
-1. Open [claude.ai](https://claude.ai) in your browser and sign in.
-2. Open Developer Tools → Application → Cookies → copy `sessionKey`.
-3. Open [claude.ai/api/organizations](https://claude.ai/api/organizations) in the same browser and copy the `uuid`.
-
-**OAuth token (optional)**: tokens from `claude setup-token` can't read usage, so leave this blank unless you have a token that can.
-
-Click **Save Configuration**. The app tests the connection right away and tells you what worked or what to fix.
-
-> Upgrading from an older version? Earlier versions read `~/.claude/claude-usage-widget.json`. This version never reads that file. Enter your credentials in the app, then delete the old file: `rm ~/.claude/claude-usage-widget.json`
-
-### 3. Add Widget
-
-1. Right-click desktop → **Edit Widgets...**
-2. Search **"Claude"**
-3. Choose size and add
-
----
-
-## How It Works
-
-The widget calls Claude's usage API:
-
-| Method | Endpoint |
-|--------|----------|
-| OAuth | `GET https://api.anthropic.com/api/oauth/usage` |
-| Session Key | `GET https://claude.ai/api/organizations/{orgId}/usage` |
-
-Returns:
-- `five_hour.utilization` — 5-hour window usage %
-- `five_hour.resets_at` — reset timestamp
-- `seven_day.utilization` — weekly usage %
-- `seven_day.resets_at` — weekly reset timestamp
-
----
+- A session key gives access to your Claude account. Treat it like a password and don't share it.
+- The key is stored in your login keychain. Only this app and its widget can read it.
+- The app sends the key only to claude.ai, and it refuses redirects to anywhere else.
+- Usage history is percentages and reset times only. It's saved on your Mac for 90 days and never uploaded.
+- Your Apple signing team is saved in `Config/Signing.local.xcconfig`, which git ignores.
+- The app uses claude.ai's usage data, which isn't a documented API. It may change or break without notice.
 
 ## Development
 
-### Project Structure
-
-```
-ClaudeUsageWidget/
-├── ClaudeUsageWidget/                    # Host app (config UI)
-│   ├── ClaudeUsageWidgetApp.swift
-│   ├── ContentView.swift                 # Credential config form
-│   └── Info.plist
-├── ClaudeUsageWidgetExtension/           # Widget extension
-│   ├── ClaudeUsageWidget.swift           # Views + API logic
-│   ├── ClaudeUsageWidgetBundle.swift     # Entry point
-│   ├── ClaudeUsageWidgetExtension.entitlements
-│   └── Info.plist
-└── screenshots/
-```
-
-> **Note:** Widget extensions run in App Sandbox. We use `getpwuid(getuid())` to resolve the real home directory instead of `FileManager.default.homeDirectoryForCurrentUser` (which returns the sandbox container path).
-
-## Requirements
-
-- macOS 15.0+
-- Xcode 16.0+
-- Claude Pro / Team / Enterprise subscription
+- `Shared/` holds the logic used by both the app and the widget.
+- `ClaudeUsageWidget/` is the app: menu bar, dashboard, and settings.
+- `ClaudeUsageWidgetExtension/` is the widget.
+- Run the logic tests with `swift test --scratch-path ~/Library/Caches/ClaudeUsageWidget/spm`. A scratch path outside iCloud keeps macOS from refusing to sign the test bundle.
 
 ## License
 
-MIT — see [LICENSE](LICENSE)
+MIT. See [LICENSE](LICENSE). Original work © 2026 Huan Ma.

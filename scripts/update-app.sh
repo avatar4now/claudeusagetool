@@ -17,7 +17,6 @@ installed="$install_dir/$app_name"
 backup_dir="$HOME/Library/Application Support/ClaudeUsageWidget Backups"
 widget_id=dev.huan.ClaudeUsageWidget.WidgetExtension
 lsregister=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
-expected_team=$(awk -F' = ' '/DEVELOPMENT_TEAM = /{gsub(/[;" ]/, "", $2); print $2; exit}' "$project/project.pbxproj")
 
 tmp_root="${TMPDIR:-/tmp}"
 # The test build lives outside the project folder. When the project sits in an iCloud-synced folder such as
@@ -25,6 +24,20 @@ tmp_root="${TMPDIR:-/tmp}"
 spm_build="$HOME/Library/Caches/ClaudeUsageWidget/spm"
 
 fail() { echo "✗ $*" >&2; exit 1; }
+
+# Your Apple team signs the app. It lives in a file git ignores, so it's never published. On the first run the
+# script reads it from the Apple Development certificate Xcode made when you added your Apple ID.
+signing_local=Config/Signing.local.xcconfig
+if [[ ! -f "$signing_local" ]]; then
+  detected_team=$(security find-certificate -a -c "Apple Development" -p 2>/dev/null \
+    | openssl x509 -noout -subject 2>/dev/null \
+    | sed -n 's/.*OU *= *\([A-Z0-9]\{10\}\).*/\1/p' | head -1 || true)
+  [[ -n "$detected_team" ]] || fail "No Apple Development certificate found. Open Xcode → Settings → Accounts, add your Apple ID, then click Manage Certificates and add an Apple Development certificate. Then run this again."
+  printf '// Your Apple team for signing. This file stays on your Mac; git ignores it.\nDEVELOPMENT_TEAM = %s\n' "$detected_team" > "$signing_local"
+  echo "==> Signing with your team $detected_team, saved in $signing_local"
+fi
+expected_team=$(awk -F'=' '/^[[:space:]]*DEVELOPMENT_TEAM[[:space:]]*=/{gsub(/[;" [:space:]]/, "", $2); print $2; exit}' "$signing_local")
+[[ -n "$expected_team" ]] || fail "Put your Apple team ID in $signing_local, like: DEVELOPMENT_TEAM = ABCDE12345"
 
 staging="$install_dir/.ClaudeUsageWidget-installing.app"
 previous="$install_dir/.ClaudeUsageWidget-previous.app"
@@ -87,6 +100,7 @@ trap cleanup EXIT
 build_log="$build_dir/build.log"
 if ! xcodebuild -project "$project" -scheme "$scheme" -configuration Release -destination 'platform=macOS' \
      -derivedDataPath "$build_dir/DerivedData" \
+     DEVELOPMENT_TEAM="$expected_team" \
      CUW_BUILD_COMMIT="$build_commit" CUW_BUILD_BRANCH="$build_branch" CUW_BUILD_DATE="$build_date" \
      build >"$build_log" 2>&1; then
   grep -E 'error:' "$build_log" | head -20 >&2 || true

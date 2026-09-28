@@ -1,0 +1,10 @@
+// Code signing for builds on your own Mac.
+//
+// Your Apple team ID goes in Config/Signing.local.xcconfig, which git ignores, so it's never published:
+//
+//     DEVELOPMENT_TEAM = ABCDE12345
+//
+// scripts/update-app.sh creates that file the first time it runs, using the Apple Development certificate
+// Xcode made when you added your Apple ID in Xcode → Settings → Accounts.
+
+#include? "Signing.local.xcconfig"
