@@ -156,9 +156,10 @@ enum ResetStyle: String, CaseIterable, Codable, Sendable, Identifiable {
 
 /// The picture in the menu bar.
 enum MenuBarIconStyle: String, CaseIterable, Codable, Sendable, Identifiable {
-    /// A gauge that changes into a warning, clock, or reset symbol when something needs attention.
+    /// A gauge whose needle follows usage, and which changes into a warning, clock, or reset symbol when something
+    /// needs attention.
     case status
-    /// A gauge whose needle points at the percentage used.
+    /// The same gauge. Kept so settings saved by earlier versions still load.
     case gauge
     /// A small ring that fills and changes color.
     case ring
@@ -170,8 +171,8 @@ enum MenuBarIconStyle: String, CaseIterable, Codable, Sendable, Identifiable {
 
     var title: String {
         switch self {
-        case .status: return "Status"
-        case .gauge: return "Moving gauge"
+        case .status: return "Gauge"
+        case .gauge: return "Gauge"
         case .ring: return "Color ring"
         case .battery: return "Battery"
         case .none: return "None"
@@ -339,6 +340,106 @@ extension Appearance {
         showPaceGuides = value(.showPaceGuides, fallback.showPaceGuides)
         showForecastLines = value(.showForecastLines, fallback.showForecastLines)
         self = sanitized()
+    }
+}
+
+// MARK: - Simple choices
+
+/// Three ready-made warning settings, so nobody has to pick two percentages by hand.
+enum WarningLevel: String, CaseIterable, Identifiable, Sendable {
+    case early
+    case normal
+    case late
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .early: return "Early"
+        case .normal: return "Normal"
+        case .late: return "Late"
+        }
+    }
+
+    var yellowAt: Int {
+        switch self {
+        case .early: return 40
+        case .normal: return 50
+        case .late: return 65
+        }
+    }
+
+    var redAt: Int {
+        switch self {
+        case .early: return 75
+        case .normal: return 90
+        case .late: return 95
+        }
+    }
+
+    /// The setting these levels match, or nil when they were set by hand.
+    init?(appearance: Appearance) {
+        guard let match = Self.allCases.first(where: { $0.yellowAt == appearance.yellowAt && $0.redAt == appearance.redAt })
+        else { return nil }
+        self = match
+    }
+
+    func apply(to appearance: inout Appearance) {
+        appearance.yellowAt = yellowAt
+        appearance.redAt = redAt
+    }
+}
+
+/// Ready-made menu bar looks, each pairing a picture with an amount of text.
+enum MenuBarStyle: String, CaseIterable, Identifiable, Sendable {
+    case gauge
+    case ring
+    case battery
+    case withReset
+    case numberOnly
+    case ringOnly
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .gauge: return "Gauge"
+        case .ring: return "Color ring"
+        case .battery: return "Battery"
+        case .withReset: return "With reset time"
+        case .numberOnly: return "Just the number"
+        case .ringOnly: return "Ring only"
+        }
+    }
+
+    var icon: MenuBarIconStyle {
+        switch self {
+        case .gauge, .withReset: return .status
+        case .ring, .ringOnly: return .ring
+        case .battery: return .battery
+        case .numberOnly: return .none
+        }
+    }
+
+    var text: MenuBarTextStyle {
+        switch self {
+        case .gauge, .ring, .battery: return .labelAndPercent
+        case .withReset: return .percentAndReset
+        case .numberOnly: return .percentOnly
+        case .ringOnly: return .none
+        }
+    }
+
+    /// The style these settings match, or nil for a combination no style uses. Both gauge settings count as the gauge.
+    init?(appearance: Appearance) {
+        let icon = appearance.menuBarIcon == .gauge ? MenuBarIconStyle.status : appearance.menuBarIcon
+        guard let match = Self.allCases.first(where: { $0.icon == icon && $0.text == appearance.menuBarText }) else { return nil }
+        self = match
+    }
+
+    func apply(to appearance: inout Appearance) {
+        appearance.menuBarIcon = icon
+        appearance.menuBarText = text
     }
 }
 

@@ -319,4 +319,40 @@ final class AppearanceTests: XCTestCase {
         XCTAssertEqual(plain(UsageFormatting.moment(at(20, 9, 0), now: now, calendar: calendar, locale: locale)),
                        "Sun, Sep 20 at 9:00 AM")
     }
+
+    // MARK: Simple choices
+
+    func testWarningsComeInThreeSimpleSettings() {
+        XCTAssertEqual(WarningLevel.allCases.map(\.title), ["Early", "Normal", "Late"])
+        XCTAssertEqual([WarningLevel.early, .normal, .late].map(\.yellowAt), [40, 50, 65])
+        XCTAssertEqual([WarningLevel.early, .normal, .late].map(\.redAt), [75, 90, 95])
+        XCTAssertEqual(WarningLevel(appearance: .standard), .normal, "the default look is Normal")
+        var custom = Appearance()
+        custom.yellowAt = 30
+        custom.redAt = 60
+        XCTAssertNil(WarningLevel(appearance: custom), "levels set by hand count as custom")
+        var appearance = Appearance()
+        WarningLevel.early.apply(to: &appearance)
+        XCTAssertEqual(appearance.yellowAt, 40)
+        XCTAssertEqual(appearance.redAt, 75)
+    }
+
+    func testMenuBarStylesPairAnIconWithText() {
+        XCTAssertEqual(MenuBarStyle.allCases.count, 6)
+        for style in MenuBarStyle.allCases {
+            var appearance = Appearance()
+            style.apply(to: &appearance)
+            XCTAssertEqual(MenuBarStyle(appearance: appearance), style, "\(style) should round-trip")
+            XCTAssertFalse(style.title.isEmpty)
+            XCTAssertFalse(appearance.menuBarIcon == .none && appearance.menuBarText == .none, "a style never hides everything")
+        }
+        XCTAssertEqual(MenuBarStyle(appearance: .standard), .gauge, "the default look is the gauge")
+        var older = Appearance()
+        older.menuBarIcon = .gauge
+        XCTAssertEqual(MenuBarStyle(appearance: older), .gauge, "both gauge settings count as the gauge style")
+        var unusual = Appearance()
+        unusual.menuBarIcon = .battery
+        unusual.menuBarText = .none
+        XCTAssertNil(MenuBarStyle(appearance: unusual), "a combination no style uses isn't shown as one")
+    }
 }

@@ -28,8 +28,7 @@ struct MenuBarLabel: View {
         if headline.awaitingReset { return .symbol("arrow.clockwise") }
         let used = headline.percent ?? 0
         switch appearance.menuBarIcon {
-        case .status: return .symbol("gauge.with.dots.needle.33percent")
-        case .gauge: return .symbol(MenuBarSymbols.gauge(percentUsed: used))
+        case .status, .gauge: return .symbol(MenuBarSymbols.gauge(percentUsed: used))
         case .battery: return .symbol(MenuBarSymbols.battery(percentUsed: used))
         case .ring: return display?.percent == nil ? .symbol("gauge.with.dots.needle.33percent") : .ring
         case .none: return .none
