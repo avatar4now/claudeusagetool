@@ -175,11 +175,13 @@ enum RefreshPolicy {
     }
 }
 
-/// The only two places the app and widget ever send a credential.
+/// The only places the app and widget ever send a credential: the two usage addresses, plus claude.ai's list of
+/// organizations, which setup reads to fill in the organization ID.
 enum ClaudeEndpoints {
     static let oauthHost = "api.anthropic.com"
     static let oauthPath = "/api/oauth/usage"
     static let sessionHost = "claude.ai"
+    static let organizationsPath = "/api/organizations"
     static let oauthUsageURL = URL(string: "https://\(oauthHost)\(oauthPath)")!
 
     /// Returns nil for a token that could break the Authorization header.
@@ -204,6 +206,15 @@ enum ClaudeEndpoints {
         return request
     }
 
+    /// The account's organizations. Returns nil for a session key that could break the Cookie header.
+    static func organizationsRequest(sessionKey: String) -> URLRequest? {
+        guard WidgetConfig.isSafeSessionKey(sessionKey),
+              let url = URL(string: "https://\(sessionHost)\(organizationsPath)") else { return nil }
+        var request = baseRequest(url)
+        request.setValue("sessionKey=\(sessionKey)", forHTTPHeaderField: "Cookie")
+        return request
+    }
+
     /// The final check before anything is sent: HTTPS to an exact approved address, with the session cookie
     /// only going to claude.ai and the OAuth token only going to api.anthropic.com.
     static func isAllowed(_ request: URLRequest) -> Bool {
@@ -215,6 +226,7 @@ enum ClaudeEndpoints {
         case oauthHost:
             return url.path == oauthPath && !hasCookie
         case sessionHost:
+            if url.path(percentEncoded: true) == organizationsPath { return !hasBearer }
             let parts = url.path.split(separator: "/", omittingEmptySubsequences: false)
             guard parts.count == 5, parts[0].isEmpty, parts[1] == "api", parts[2] == "organizations",
                   parts[4] == "usage", let uuid = UUID(uuidString: String(parts[3])),
